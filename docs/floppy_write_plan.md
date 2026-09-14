@@ -168,21 +168,68 @@ is the property that made MacPlus tractable. Stage 2 loses it — §6.1.
 
 Each phase ends at a gate evaluable on its own.
 
-### Phase 0 — Sim harness and format ground truth
-*No core changes.*
+### Phase 0 — Sim harness and format ground truth — **COMPLETE 2026-09-14**
+*No core changes, and none were made.*
 
-- Verilator/Icarus bench driving `rtl/floppy_track_encoder.v` standalone against
-  a synthetic image; dump representative tracks (0, 16, 40, 79; both sides).
-- Reference decoder in Python; confirm byte-exact recovery of all sectors.
+**Gate result: PASS.** 160 track dumps (all 80 tracks x 2 sides) from the real
+`rtl/floppy_track_encoder.v`; **1600/1600 sectors round-trip byte-exactly**, and
+all rejection cases hold. Artifacts:
+`verilator/tb_floppy_track_encoder.v`, `scripts/gcr_common.py`,
+`scripts/gcr_gen_image.py`, `scripts/gcr_decode_track.py`,
+`scripts/gcr_test_negative.py` (build + run lines in each header).
+
+- ~~Bench driving `rtl/floppy_track_encoder.v` standalone against a synthetic
+  image.~~ **DONE.** Runs under **Icarus 12.0, natively on Windows** (no
+  Verilator, no WSL) — the bench is one standalone module with `$readmemh` /
+  `$fopen`, so it needs none of the `verilator/Makefile` machinery. `+alltracks`
+  does the full sweep in ~83 s; the default is the representative 4 tracks x 2
+  sides in ~4.5 s. **Phase 1 onward still needs Verilator 5.x** (`tb_disk_swap.v`,
+  and Phase 2's RTL-to-RTL round-trip); apt on Ubuntu 22.04 ships 4.038, which
+  has neither `--binary` nor `--timing`, so that means building from source.
+- ~~Reference decoder in Python; confirm byte-exact recovery of all sectors.~~
+  **DONE**, against the RTL dumps rather than a model of the encoder.
 - ~~Fix the stale CLAUDE.md CPU-speed lines (§3).~~ **DONE 2026-09-14.**
 
 **Gate:** the reference decoder round-trips every sector of a synthetic 800K
 image byte-exactly, and rejects a corrupt data byte, a corrupt checksum byte,
 and a truncated field.
 
-MacPlus's `sim/` artifacts (`gen_image.py`, `encoder_model.py`,
-`decode_track.py`, `gcr_common.py`, `test_negative.py`) port over directly —
-confirm they still match THIS core's encoder rather than assuming it.
+MacPlus's `sim/` artifacts ported over. **The "confirm, do not assume" check
+was done and is the strongest single result here: `rtl/floppy_track_encoder.v`
+is BYTE-IDENTICAL between the two cores** (plain `diff`, zero differences), so
+the ported decoder inherits MacPlus's validation rather than merely resembling
+it. Re-run that diff before trusting any of this again. Two deliberate
+departures from MacPlus's artifact list:
+
+- **`encoder_model.py` was NOT ported.** Its job there was to prove a Python
+  reading of the nibbler correct so a decoder could be built from it. With
+  Icarus present the decoder is validated directly against real RTL dumps,
+  which is strictly stronger — a model cannot catch a misunderstanding it
+  shares with the decoder built from it. Port it only if a future task needs
+  GCR streams generated without a simulator.
+- **The negative tests were rebuilt, not ported.** MacPlus's asserted only that
+  an error was reported *somewhere near* the corruption, and its truncation case
+  asserted `len(errors) >= 0`, which is vacuously true. Ours name the sector:
+  the corrupted one must vanish and every other sector must survive byte-intact.
+  ★ That required cutting the stream to ONE REVOLUTION first — a 20000-byte
+  capture holds 2+ revolutions, so each sector appears twice and corrupting one
+  copy leaves the other to be "recovered", a test that passes while proving
+  nothing.
+
+Format facts established from the FSM while building this, all load-bearing for
+Phase 2's RTL decoder:
+
+- Sector layout is `SYN0 56 | ADDR 10 | SYN1 5 | DHDR 4 | DZRO 12 | DPRE 4 |
+  DATA 683 | DSUM 4 | DTRL 3 | WAIT 1` = **782 bytes**, confirmed against the
+  observed mark-to-mark pitch. ★ **DZRO is 12 bytes, not 8** — the RTL comment
+  says "8 zero bytes" but the FSM counts to 11.
+- The encoder writes with an **interleave of 2** (sectors come off the track
+  0,2,4,... then 1,3,5,...). Harmless for a decoder keyed on the sector number
+  in the field; fatal for one that infers position.
+- **The nibbler needs a one-group LOOKBACK.** `nib_xor_0/1/2` are registers read
+  combinationally, so group *g*'s four output bytes encode group *(g-1)*'s three
+  data bytes, not their own. This is the bug MacPlus shipped first and caught
+  only by round-tripping against RTL — not by reading the Verilog.
 
 ### Phase 1 — Convert floppies to block devices (still read-only)
 *The riskiest plumbing change, isolated from any write behaviour.*
