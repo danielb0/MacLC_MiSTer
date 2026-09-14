@@ -397,8 +397,8 @@ Re-verify boot (the screenshot check above) after ANY SR change.
   sim hex and Main's embedded header — never hand-edit those. Guest needs
   Apple's Network Software (no driver in ROM).
   **Settings are OSD options, NOT MiSTer.ini** (MiSTer.ini is parsed by Main
-  for itself and cannot even choose which binary launches — `/etc/inittab`
-  hardcodes `/media/fat/MiSTer`): `OJ` Ethernet On/Off is a real core bit,
+  for itself; the ONE thing it can do for us is pick the binary — see
+  `main=` below): `OJ` Ethernet On/Off is a real core bit,
   while `o45` Net interface and `o03` MAC suffix live in the EXTENDED status
   range (32+) that this core's `wire [31:0] status` cannot read — the right
   home for host-only settings, and it keeps the low bits free (note 15:17 =
@@ -449,7 +449,22 @@ Re-verify boot (the screenshot check above) after ANY SR change.
   ★ **A card-ON boot hang means an OLD MAIN, not an old core.** Two of the
   three fixes were host-side (`f2679bf`), so the first published ethernet
   Main (`34b8994`) pairs happily and then hangs; the RBF alone cannot fix it.
-  `md5sum /media/fat/MiSTer` must match `releases/MiSTer`. A MISSING or stock
+  `md5sum /media/fat/MiSTer` must match `releases/MiSTer`. ★ Since Main
+  `e61b111` (2024-03) MiSTer.ini can launch a DIFFERENT Main per core:
+  `[MacLC]` + `main=MacLC_MiSTer` makes the stock Main re-exec into that
+  file after loading the core (user_io.cpp `cfg.main`), so the fork can ship
+  as its own file at the SD root and the stock `/media/fat/MiSTer` stays
+  untouched (the earlier "inittab hardcodes the binary" claim here was
+  wrong). The file must not be named `MiSTer` — the check is by name.
+  ★ hps_io SLOT RULE (2026-09-14): Main sends a mount as ONE word,
+  `(1<<slot)|0x80` when read-only, and hps_io takes img_mounted from
+  `io_din[VDNUM-1:0]` and img_readonly from `io_din[7]` — so slot 7 is the
+  read-only bit and MUST stay a hole (the Phase 1 floppy fit put the ext
+  floppy there and hung after the chime: every read-only mount started its
+  loader on an empty slot, zeros wrapped over RAM). Slots 0..6 need nothing
+  special; 8..9 need the fork Main's 16-bit send (`spi_uio_cmd16`, branch
+  `mount-notify-16bit`) — an 8-bit send truncates `1<<8` to 0 = slot 0.
+  A MISSING or stock
   Main cannot hang anything — presence latches at guest reset, so no MAGIC
   means slot $E stays open-bus and the machine boots as with no card. Regression gates for ANY
   ethernet/SDRAM edit: `verilator/tb_pds_enet.v` (43 checks, build cmd in

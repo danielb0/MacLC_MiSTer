@@ -81,7 +81,7 @@ module emu
 		"MACLC;UART57600:115200,MIDI;",
 		"-;",
 		"S6,DSKIMG,Mount Pri Floppy;",
-		"S7,DSKIMG,Mount Sec Floppy;",
+		"S8,DSKIMG,Mount Sec Floppy;",
 		"-;",
 		"SC0,IMGVHDHDA,Mount SCSI-0;",
 		"SC1,IMGVHDHDA,Mount SCSI-1;",
@@ -208,13 +208,28 @@ module emu
 	localparam VD_TOOLBOX = 3;         // BlueSCSI Toolbox shared folder -> hps_io slot 3
 	localparam VD_CDROM   = 4;         // CD-ROM image (SCSI ID 3) -> hps_io slot 4
 	localparam VD_CD_TOOLBOX = 5;      // BlueSCSI Toolbox CD Changer control -> hps_io slot 5
-	// Phase 1 (2026-09-14): floppies became block devices. They take the two
-	// NEW indices deliberately — every device above keeps the slot it already
+	// Phase 1 (2026-09-14): floppies became block devices. They take NEW
+	// indices deliberately — every device above keeps the slot it already
 	// had, so a user's saved mounts (config/MacLC.sN) still resolve after the
 	// upgrade. Do not renumber these to "tidy up".
+	//
+	// ★ SLOT 7 IS UNUSABLE AND MUST STAY A HOLE. Main notifies a mount with
+	// one word, (1 << slot) | 0x80-if-read-only, and hps_io.sv decodes it as
+	// img_mounted <= io_din[VDNUM-1:0] AND img_readonly <= io_din[7]. So with
+	// VDNUM > 7, bit 7 is delivered as BOTH the read-only flag and slot 7:
+	// every read-only mount anywhere (the CD, the two Toolbox announces,
+	// which fire on EVERY core start) pulses img_mounted[7]. The first
+	// Phase 1 fit put the external floppy there: its loader started on a
+	// slot with no image, Main served zero blocks, the 24-bit write address
+	// wrapped over guest RAM and the ROM, and the machine hung right after
+	// the boot chime. Slots 8+ additionally need Main to send the word
+	// 16-bit (fork user_io.cpp / mac.cpp spi_uio_cmd16 — an 8-bit send
+	// truncates 1<<8 to 0, which hps_io maps to slot 0 = SCSI-0). The fork
+	// Main is already required for ethernet and CD images.
 	localparam VD_FLOPPY_INT = 6;      // internal floppy image -> hps_io slot 6
-	localparam VD_FLOPPY_EXT = 7;      // external floppy image -> hps_io slot 7
-	localparam VDNUM      = 8;         // total hps_io block devices
+	                                   // slot 7: HOLE (read-only bit), see above
+	localparam VD_FLOPPY_EXT = 8;      // external floppy image -> hps_io slot 8
+	localparam VDNUM      = 9;         // total hps_io block devices (slot 7 tied off)
 
 	// the status register is controlled by the on screen display (OSD)
 	wire [31:0] status;
@@ -2516,6 +2531,14 @@ module emu
 	assign sd_wr[VD_FLOPPY_EXT] = 1'b0;
 	assign sd_buff_din[VD_FLOPPY_INT] = 16'd0;
 	assign sd_buff_din[VD_FLOPPY_EXT] = 16'd0;
+
+	// slot 7 is the read-only bit of the mount word (see the VD_* block): it
+	// receives a spurious img_mounted pulse on every read-only mount and must
+	// never drive a device. Tied off so it can never request anything.
+	assign sd_lba[7]      = 32'd0;
+	assign sd_rd[7]       = 1'b0;
+	assign sd_wr[7]       = 1'b0;
+	assign sd_buff_din[7] = 16'd0;
 
 	// diskEject is set by macos on eject
 	always @(posedge clk_sys) begin
