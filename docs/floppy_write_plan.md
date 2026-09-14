@@ -497,8 +497,32 @@ Phase 3 carve-outs (§1) landed; without them, add the read-path rework back.
 
 Noted while scoping; owner asked.
 
-- **DiskCopy 4.2 support** — MacPlus's readme still tells users to convert
-  externally; this core reads DC42 natively (`MacLC.sv:2529`).
+- **DiskCopy 4.2 support** — MacPlus has **no DC42 handling at all**: the only
+  mention in its tree is `readme.md:34` telling users to convert externally,
+  with a link to a converter and `releases/bin2dsk.sh` shipped for the purpose.
+  This core reads DC42 natively (`MacLC.sv:2529`, and from Phase 1 in
+  `rtl/floppy_loader.v`).
+
+  Transfers essentially unchanged, being file-format logic rather than machine
+  logic: detection on the RAW delivered word (name length `d[7:0]` at word 0 in
+  1..63; magic `d == 16'h0001` at word 41 — NOT the byte-swapped word, see the
+  2026-09-14 bug), the reason raw images cannot false-trigger (byte 0 of a
+  bootable HFS floppy is `'L'` = 76 > 63, or `$00` blank), the 42-word strip,
+  and the format byte at word 40 as the geometry discriminator — **with its
+  reason: tags trail the sector data, so payload size lies** (an 800K DC42 is
+  838400 payload bytes, not 819200, and matches no size test).
+
+  Does NOT transfer: our SDRAM download-port choice (MacPlus drains via the
+  extra slot), the 13-bit `sd_buff_addr` (theirs is 8-bit), and DC42 formats
+  2/3 — a Plus is 400K/800K GCR only, so only formats 0 and 1 are meaningful.
+
+  ★ **SAFETY: on MacPlus the DC42 read support and the "DC42 presents
+  write-protected" gate MUST land in the SAME commit.** Here the two are
+  comfortably sequential because no write path exists yet. MacPlus already
+  SHIPS floppy writes, so DC42 detection landing alone means the first write to
+  a mounted DC42 image is placed 84 bytes off — corrupting the user's file, and
+  doing it silently, because a read back through the same wrong offset looks
+  self-consistent. Port `raw_img` (or an equivalent) at the same time.
 - **The MAME comparison toolchain** — MacPlus has none.
 - **The MAME-grounded `SWITCHED` semantics**, implemented and hardware-validated
   here, which answer the exact open risk MacPlus's own Phase 5 flagged as
