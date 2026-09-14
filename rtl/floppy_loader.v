@@ -75,8 +75,15 @@ module floppy_loader
 	reg [15:0] buf_ram [0:255];
 	reg  [7:0] drain_idx;
 
+	// Stored BYTE-SWAPPED. hps_io assigns both paths from the same source —
+	// `ioctl_dout <= io_din[DW:0]` (hps_io.sv:692) and
+	// `sd_buff_dout <= io_din[DW:0]` (hps_io.sv:405) — so a block-device word
+	// packs exactly like a download word, and the read side depends on the
+	// swap the old download path applied (MacLC.sv:2544
+	// `{ioctl_data[7:0], ioctl_data[15:8]}`). Omitting it transposes every
+	// byte pair: the disk mounts and is unreadable.
 	always @(posedge clk_sys)
-		if (sd_buff_wr && sd_ack) buf_ram[sd_buff_addr[7:0]] <= sd_buff_dout;
+		if (sd_buff_wr && sd_ack) buf_ram[sd_buff_addr[7:0]] <= sw_data;
 
 	localparam S_IDLE   = 3'd0;
 	localparam S_RD     = 3'd1;   // sd_rd asserted, waiting for the sector
@@ -152,10 +159,16 @@ module floppy_loader
 			end
 
 			S_RD: begin
-				// hps_io raises sd_ack for the transfer and drops it when the
-				// sector has been delivered.
+				// hps_io raises sd_ack when it picks the transfer up and drops
+				// it once the sector has been delivered. DROP THE REQUEST ON
+				// THE RISING EDGE, not at the end: this core's own SCSI does
+				// exactly that (rtl/scsi.v:1847 `if(io_ack) io_rd_d <= 1'b0;`,
+				// with completion tracked separately off the falling edge).
+				// Holding sd_rd up for the whole transfer leaves the request
+				// still asserted when hps_io next samples it, and it re-issues
+				// the same LBA.
+				if (sd_ack) sd_rd <= 1'b0;
 				if (old_ack && !sd_ack) begin
-					sd_rd     <= 1'b0;
 					drain_idx <= 8'd0;
 					state     <= S_WAIT;
 				end
