@@ -65,7 +65,15 @@ module floppy_loader
 	output reg        done,          // one clk_sys pulse: image fully resident
 	output reg [63:0] size,          // latched payload size (DC42 header removed)
 	output reg        readonly,      // latched at THIS slot's own mount pulse
-	output reg        raw_img        // 1 = raw sector image (writable in stage 1)
+	output reg        raw_img,       // 1 = raw sector image (writable in stage 1)
+	output reg        is_dc42,       // 1 = a DiskCopy 4.2 image was detected
+	output reg  [7:0] dc42_fmt       // DC42 byte 0x50: 0=400K 1=800K 2=720K 3=1440K
+	                                 // ★ For a DC42 image `size` CANNOT decide the
+	                                 // geometry: tags trail the sector data, so an
+	                                 // 800K DC42 has 838400 payload bytes, not
+	                                 // 819200, and matches no size test. This byte
+	                                 // is the discriminator — same as the old
+	                                 // download path's dc42_disk_format.
 );
 
 	// ── sector staging RAM ────────────────────────────────────────────────
@@ -99,10 +107,17 @@ module floppy_loader
 	reg        dc42_name_ok;
 	reg        old_ack;
 
-	// DC42 header words, sampled as sector 0 streams past: word 0's low byte
-	// is a Pascal name length (1..63), word 40's low byte is the disk-format
-	// byte, word 41 is the 16-bit magic 0x0001 at byte offset 82. Same test
-	// the old download path used (MacLC.sv:2529), applied to the same words.
+	// DC42 header words, sampled as sector 0 streams past.
+	//
+	// ★ TESTED ON THE RAW DELIVERED WORD, NOT THE SWAPPED ONE. In the HPS
+	// word, bit [7:0] is the FIRST byte of the pair (which is why the storage
+	// swap is {d[7:0], d[15:8]}). The proven download path tests raw
+	// `ioctl_data` (MacLC.sv:2538-2541) and this must match it exactly:
+	//   word 0  byte 0  = d[7:0] : Pascal name length, 1..63
+	//   word 40 byte 80 = d[7:0] : disk-format byte (DC42 offset 0x50)
+	//   word 41         = d      : the magic, 16'h0001
+	// Testing the swapped word instead reads byte 1 for the name length and
+	// transposes the magic.
 	localparam DC42_HDR_WORDS = 24'd42;   // 84 bytes
 
 	wire [15:0] sw_data = {sd_buff_dout[7:0], sd_buff_dout[15:8]};   // byte swap,
@@ -122,13 +137,17 @@ module floppy_loader
 			readonly <= 1'b0;
 			raw_img  <= 1'b0;
 			dc42     <= 1'b0;
+			is_dc42  <= 1'b0;
+			dc42_fmt <= 8'd0;
 		end else begin
 
 			// ── capture the DC42 signature as sector 0 streams in ──────────
 			if (state == S_RD && sd_buff_wr && sd_ack && sd_lba == 32'd0) begin
 				if (sd_buff_addr[7:0] == 8'd0)
-					dc42_name_ok <= (sw_data[7:0] >= 8'd1) && (sw_data[7:0] <= 8'd63);
-				else if (sd_buff_addr[7:0] == 8'd41 && dc42_name_ok && sw_data == 16'h0001)
+					dc42_name_ok <= (sd_buff_dout[7:0] >= 8'd1) && (sd_buff_dout[7:0] <= 8'd63);
+				else if (sd_buff_addr[7:0] == 8'd40)
+					dc42_fmt <= sd_buff_dout[7:0];      // DC42 byte 0x50
+				else if (sd_buff_addr[7:0] == 8'd41 && dc42_name_ok && sd_buff_dout == 16'h0001)
 					dc42 <= 1'b1;
 			end
 
@@ -143,6 +162,7 @@ module floppy_loader
 					readonly     <= img_readonly;
 					dc42         <= 1'b0;
 					dc42_name_ok <= 1'b0;
+					dc42_fmt     <= 8'd0;
 					raw_img      <= 1'b0;
 					size         <= 64'd0;
 					if (img_size != 64'd0) begin
@@ -215,6 +235,7 @@ module floppy_loader
 				// is the file minus its header. raw_img gates stage-1 writes.
 				size    <= dc42 ? (img_size_l - 64'd84) : img_size_l;   // 42 words
 				raw_img <= !dc42;
+				is_dc42 <= dc42;
 				loading <= 1'b0;
 				done    <= 1'b1;         // one pulse, AFTER the image is resident
 				state   <= S_IDLE;

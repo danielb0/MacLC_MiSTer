@@ -50,7 +50,8 @@ module tb_floppy_loader;
 	wire        wr_req;
 	reg         wr_ack = 0;
 
-	wire        loading, done, raw_img, readonly;
+	wire        loading, done, raw_img, readonly, is_dc42;
+	wire  [7:0] dc42_fmt;
 	wire [63:0] size;
 
 	localparam [23:0] BASE = 24'h600000;
@@ -63,7 +64,8 @@ module tb_floppy_loader;
 		.base_addr(BASE),
 		.wr_addr(wr_addr), .wr_data(wr_data), .wr_req(wr_req), .wr_ack(wr_ack),
 		.loading(loading), .done(done), .size(size),
-		.readonly(readonly), .raw_img(raw_img)
+		.readonly(readonly), .raw_img(raw_img),
+		.is_dc42(is_dc42), .dc42_fmt(dc42_fmt)
 	);
 
 	integer errors = 0;
@@ -102,15 +104,22 @@ module tb_floppy_loader;
 
 	reg dc42_mode;
 
-	// A DiskCopy 4.2 header word, as the HPS delivers it (i.e. PRE-swap, since
-	// the loader swaps on the way in). The loader's test is on the swapped
-	// value: word 0's low byte a Pascal name length 1..63, word 41 == 0x0001.
+	// A real DiskCopy 4.2 header word as the HPS delivers it. ★ The detection
+	// is on the RAW word: d[7:0] is the FIRST byte of the pair. Anchored to
+	// the proven download path (MacLC.sv:2538-2541), NOT to what the loader
+	// happens to do — an earlier version of this bench was built to match a
+	// buggy loader and passed while both were wrong.
+	//   word 0  : byte 0  = d[7:0] = Pascal name length 1..63
+	//   word 40 : byte 80 = d[7:0] = disk-format byte (0=400K 1=800K 2=720K 3=1440K)
+	//   word 41 : d = 16'h0001, the magic
+	localparam [7:0] DC42_TEST_FMT = 8'd1;      // 800K GCR
 	function [15:0] dc42_hdr_word(input integer widx);
 		begin
 			case (widx)
-				0:       dc42_hdr_word = 16'h0A00;   // swap -> 0x000A, len 10: valid
-				41:      dc42_hdr_word = 16'h0100;   // swap -> 0x0001, the magic
-				default: dc42_hdr_word = 16'hEEEE;   // filler, must never reach SDRAM
+				0:       dc42_hdr_word = {8'h41, 8'd10};          // name length 10
+				40:      dc42_hdr_word = {8'h00, DC42_TEST_FMT};  // byte 0x50
+				41:      dc42_hdr_word = 16'h0001;                // the magic
+				default: dc42_hdr_word = 16'hEEEE;                // must never reach SDRAM
 			endcase
 		end
 	endfunction
@@ -246,6 +255,9 @@ module tb_floppy_loader;
 		run_mount(64'd2048, 1'b0, 1'b1, 4);
 
 		ck(raw_img === 1'b0, "dc42: raw_img CLEAR (must present write-protected)");
+		ck(is_dc42 === 1'b1, "dc42: detected from the RAW header word");
+		ck(dc42_fmt == DC42_TEST_FMT,
+		   "dc42: format byte captured (size cannot decide geometry: tags trail)");
 		ck(size == 64'd2048 - 64'd84, "dc42: size is the file minus the 84-byte header");
 		ck(n_writes - wbase == (4 * 256) - 42, "dc42: wrote 982 words (1024 - 42 header)");
 
