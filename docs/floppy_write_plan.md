@@ -355,10 +355,24 @@ classes of fault; stage 2 needs both.
 ### 6.2 Block-device conversion is messier here than on MacPlus
 
 - **DC42 is detected mid-download-stream and its 84-byte header is NOT
-  sector-aligned** (`MacLC.sv:2529` subtracts 42 words). Every guest sector
-  write straddles two SD blocks. Either read-modify-write both, or normalise the
-  image at load and keep the offset only in the LBA math. **Decide this in
-  Phase 1, not Phase 4.**
+  sector-aligned** (`MacLC.sv:2529` subtracts 42 words). **DECIDED 2026-09-14,
+  owner's call:**
+  1. **Load normalises.** The 84-byte header is stripped while streaming, so
+     SDRAM holds pure sector data and guest sector N is at SDRAM offset N*512.
+     Everything downstream of SDRAM is then format-agnostic. This is right under
+     either write policy, so it is not a decision the write side can regret.
+  2. **Stage-1 writes are RAW IMAGES ONLY** (`.dsk`/`.img`). For a raw image
+     sector N is at file offset N*512 = exactly one aligned SD block, so Phase 4
+     never needs a read-modify-write. DC42 images stay mountable and READABLE
+     exactly as today; the write-enable is simply refused for them, alongside
+     the latched `img_readonly`.
+  3. Rationale: 84 is not a multiple of 512, so a DC42 write is *structurally* a
+     two-block RMW with a partial-failure window, and it would land in Phase 4 —
+     the phase that first touches the user's file. DC42 is a distribution format
+     that is overwhelmingly read. The cost/benefit is not close.
+  ★ Consequence to carry into Phase 3: the OSD write-enable must be ANDed with
+  "this slot mounted a RAW image", not only with `img_readonly`. A DC42 mount
+  must present as write-protected.
 - **The media-change machinery is all keyed off download start/end** —
   `DSK_EMPTY_CY` (`MacLC.sv:2434`), CSTIN, `disk_switched`, and the `.dsk`/
   `.img` index-nibble compare — and must be re-derived from
