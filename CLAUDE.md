@@ -129,7 +129,13 @@ Standard MiSTer framework files (video scaling, HPS I/O, audio output). Generall
 - **System clock:** Generated via `rtl/pll.v`
 - **Memory:** 1MB/4MB RAM configurations, DDR3 SDRAM interface
 - **Video modes:** 1/2/4/8/16 bpp
-- **CPU speeds:** 8 MHz (original) or 16 MHz
+- **CPU clock:** **fixed 16.25 MHz** 68020 — `clk_sys` is 32.5 MHz
+  (`rtl/pll.v` outclk_1) and `clk16_en_p/n` alternate every cycle
+  (`rtl/addrController_top.v:115`), so a phi1/phi2 pair is 2 clk_sys cycles.
+  **There is no speed selector**: `status_cpu` is a `localparam` (`MacLC.sv:170`)
+  and the CONF_STR has no speed row. The 8.125 MHz `clk8_en_p/n` off the same
+  divider is the **peripheral** bus enable, not an alternate CPU speed — that
+  is most likely where the old "8 MHz or 16 MHz" line came from.
 
 ## File Locations
 
@@ -292,7 +298,12 @@ Re-verify boot (the screenshot check above) after ANY SR change.
   `scripts/grab_fresh.sh` (stock grab.sh serves STALE frames when video is
   dead), plus a >=2-boot Finder soak (see the probes-off anchor comment in
   MacLC.sv).
-- Floppy won't read at 16 MHz CPU speed
+- ~~Floppy won't read at 16 MHz CPU speed~~ **NOT A LIMITATION OF THIS CORE**
+  (corrected 2026-09-14): inherited MacPlus text, where `O5,Speed,8MHz,16MHz`
+  fans `status_turbo` into the CPU enables, both VIAs' `E_div` and the disk
+  logic. The LC has no such option — one fixed 16.25 MHz rate, see CPU clock
+  above. Do not re-add it from MacPlus, and do not reach for it as an
+  explanation when floppy timing misbehaves: there is no other speed to be in.
 - Bus retry via HALT signal not implemented
 - ~~"Original" aspect was 256:171~~ FIXED 2026-08-08: that was the Mac Plus
   512x342 screen, inherited at import — it drew ~12% wide and OVERFLOWED

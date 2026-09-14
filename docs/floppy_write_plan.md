@@ -117,9 +117,15 @@ once and stays answered.
 The one axis where the LC is *more* complex is format: GCR and MFM through the
 same SWIM. Stage 1 exists to take that off the table for v1.
 
-★ **CLAUDE.md is stale here and should be corrected in Phase 0.** "CPU speeds:
-8 MHz (original) or 16 MHz" and the known limitation "Floppy won't read at
-16 MHz CPU speed" are both inherited MacPlus text; neither is true of this core.
+★ **CLAUDE.md was stale here; CORRECTED 2026-09-14.** "CPU speeds: 8 MHz
+(original) or 16 MHz" and the known limitation "Floppy won't read at 16 MHz CPU
+speed" were both inherited MacPlus text, and neither was true of this core. The
+rate is **fixed 16.25 MHz**: `clk_sys` 32.5 MHz (`rtl/pll.v` outclk_1) with
+`clk16_en_p/n` alternating every cycle (`rtl/addrController_top.v:115`), so a
+phi1/phi2 pair spans 2 clk_sys cycles. The 8.125 MHz `clk8_en_p/n` off the same
+divider is the peripheral bus enable — the likely origin of the "8 MHz" half.
+The second line mattered most: it is a *floppy timing* limitation pointing at a
+mode that does not exist, i.e. a ready-made false lead for exactly this work.
 
 ---
 
@@ -168,7 +174,7 @@ Each phase ends at a gate evaluable on its own.
 - Verilator/Icarus bench driving `rtl/floppy_track_encoder.v` standalone against
   a synthetic image; dump representative tracks (0, 16, 40, 79; both sides).
 - Reference decoder in Python; confirm byte-exact recovery of all sectors.
-- Fix the stale CLAUDE.md CPU-speed lines (§3).
+- ~~Fix the stale CLAUDE.md CPU-speed lines (§3).~~ **DONE 2026-09-14.**
 
 **Gate:** the reference decoder round-trips every sector of a synthetic 800K
 image byte-exactly, and rejects a corrupt data byte, a corrupt checksum byte,
