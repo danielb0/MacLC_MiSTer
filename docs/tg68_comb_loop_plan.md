@@ -369,7 +369,7 @@ gets its own hardware boot regardless). Three sequential full builds.
 | Seed | STA | Loops | Kernel-internal worst (data / slack vs 61.5 ns) | RBF md5 | Hardware |
 |---|---|---|---|---|---|
 | 4 | met, worst +0.254 ns (hold, CPU PLL clock) | 0 | 30.481 ns / +28.430 (regfile PORT_B_WRITE_ENABLE_REG → regfile_rtl_1_bypass[6]) | 43ea5373 | **PASS** — reboot with CD inserted, Quark typing, benchmarks in the usual ballpark (owner) |
-| 5 | building | | | | |
+| 5 | met, worst +0.179 ns (hold, HDMI PLL clock) | 0 | 29.741 ns / +29.517 (same regfile cone, → regfile_rtl_1_bypass[2]) | 94c6d3f0 | pending |
 | 7 | | | | | |
 
 Note on seed 4: with the credit the fitter let the kernel relax from 24.8 ns
