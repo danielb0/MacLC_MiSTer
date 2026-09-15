@@ -434,3 +434,9 @@ with repair I/O in progress. Ruling: NOT a Phase B fail on its own. Seed 5
 must now pass a clean Finder soak (2 normal boots, colour-icon folders
 opened, Quark typing, restart); any further mis-drawn icon on a normal boot
 = FAIL, cap back, chain read immediately.
+Owner's follow-up: on that same boot QuarkXPress had already loaded, run and
+quit cleanly BEFORE the icon was noticed, and the machine went on to a clean
+normal reboot with every icon fine. The earlier sighting (a different, older
+build) ended in a dramatic crash when the icon was moved — memory already
+corrupt, i.e. the class the Speedometer heap-hang belongs to, not this one.
+Seed 5 soak: 1 clean normal boot so far, testing continuing.
