@@ -459,3 +459,15 @@ is logged above; it did not recur across the soak.
 **Next:** PR branch off `upstream/master` with the kernel VHDL/`.v`,
 `verilator/tb_mul_modes.v`, and `MacLC.sdc`; probes-off SEED 4 fit of exactly
 that design; hardware gate; RBF into `releases/`; PR.
+
+### PR candidate (2026-09-15 23:29) — gate pending
+
+Branch `tg68-loop-pr` (git worktree `../MacLC_pr`, off `upstream/master`
+`ecaf6b2`): `32fe18c` = kernel .vhd/.v + `verilator/tb_mul_modes.v` +
+`MacLC.sdc` (credit) + `scripts/report_loops.tcl`, nothing else; kernel and
+SDC byte-identical to this branch. `e5bd6fd` = `releases/MacLC_4c0ade10.rbf`,
+the probes-off SEED 4 fit of exactly that commit: STA met (tightest +0.165 ns,
+HDMI PLL hold), no loop, fit 10 / STA 2 warnings (= the loop-free counts),
+kernel-internal worst 28.981 ns (+31.788 vs 61.5). Reports in
+`scratch/tg68loop/pr_seed4/`. **Owner gates this binary next (2 boots, Quark,
+restart), then push + PR.** Not pushed tonight.
