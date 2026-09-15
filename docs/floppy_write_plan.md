@@ -643,7 +643,29 @@ classes of fault; stage 2 needs both.
        (b) recompute on eject/unmount by re-reading the payload (819200 bytes
            for an 800K image — cheap, and it happens once per session);
        (c) zero the fields.
-       (b) is the honest one and is the current recommendation.
+
+  5. ★ **HOW is explicitly NOT DECIDED (owner, 2026-09-15).** Only *that* DC42
+     becomes writable is settled. Everything in items 3-4 is the cost of ONE
+     approach — writing back in place, in the container — and a different
+     approach may not pay it at all. The owner's own suggestion:
+
+     - **(d) Normalise the FILE on first write: strip the header and leave a
+       plain raw image.** Sector N then lands at N*512, so there is no RMW, no
+       torn-write window, and no checksum problem — all of items 3-4 evaporate.
+       The load path already normalises into SDRAM (item 1), so the core
+       already holds exactly the bytes such a file needs.
+       Open question that decides its feasibility: **the file has to get 84
+       bytes shorter** (19284 for an 800K image with tags), and `hps_io`'s block
+       interface writes blocks — it has no truncate, and no create. So this
+       likely needs Main-side support, which is a different kind of cost, not a
+       smaller one. Check before choosing it. A variant that avoids truncation —
+       rewriting in place and leaving a stale tail — makes the file's size stop
+       matching its content, which is its own trap given how much of this core's
+       geometry logic keys off size.
+
+     Decide between (a)-(d) at the start of Phase 4, not before: Phase 4 is the
+     first phase that touches the user's file, and by then the write path will
+     have been proven on hardware.
      - *Tags*: the guest's GCR stream carries the 12 tag bytes per sector and the
        decoder currently drops them. A DC42 with a tag section has somewhere to
        put them. Writing them is optional; NOT writing them leaves the tag
