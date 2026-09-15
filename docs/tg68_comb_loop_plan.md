@@ -320,3 +320,33 @@ Load `scratch/tg68loop/MacLC_fix_seed4.rbf` and run the plan's A5 list: two
 boots to the Finder (CD attach stays attached), QuarkXPress typing, a
 Speedometer 3.23 CPU run compared to the PR #5 numbers (identical function ⇒
 identical score), and a restart soak. Record the outcome here before Phase B.
+
+### A5 result (owner, 2026-09-15 evening) — PASS with one noted intermittent
+
+RBF `scratch/tg68loop/MacLC_fix_seed4.rbf` on the DE10-Nano:
+- Boots to the Finder; QuarkXPress ran (the known reproducer of the
+  kernel-timing class); the core was reported "quite stable".
+- **Speedometer 4.02** (Quadra 605 = 1.0, same image/System as the PR #5
+  A/B): CPU **0.202**, Graphics 0.199, Math **0.662**, Disk 0.434, PR 0.244.
+  Baseline 20260827 / PR #5: CPU 0.203 / 0.203, Graphics 0.202 / 0.207, Math
+  0.662 / 0.662, Disk 0.480 / n.r., PR 0.248 / 0.250. **CPU and Math — the
+  kernel-sensitive figures — are identical**, the hardware-side equivalence
+  witness. Disk −9%: run with a CD mounted; the memory records a mounted
+  floppy costing ~13% on both builds, so mount state is the first
+  explanation — re-run with only the boot disk mounted before reading it as
+  a core change. (Earlier text in this doc said "Speedometer 3.23"; the A/B
+  tool is 4.02.)
+- **Restart:** the first Special ▸ Restart with a CD mounted hung at a frozen
+  desktop with a live mouse (a driver call never returning, not a CPU
+  freeze). Two further restarts, one with the CD mounted and one without,
+  both came up clean. That is the intermittent CD-attach class CLAUDE.md
+  documents ("fires on ANY build, retry the boot rather than blaming the
+  build"), so it is recorded, not charged to the fix. If it recurs: a debug
+  fit with `USE_DBG_OBSERVER` was built for it
+  (`scratch/tg68loop/MacLC_fix_seed4_dbg_observer.rbf`); load it, reproduce,
+  `bash scripts/read_probes.sh` — PIFA/PADR name the spinning driver loop,
+  PSC2/PSC3/PSCS the SCSI phase and last polled register. The JTAG chain is
+  live from this machine (checked 2026-09-15: DE-SoC [USB-1], 5CSEBA6).
+  Note the release fit has NO probe instances, so nothing can be read from it.
+
+**Phase A is closed.** Phase B (§4) is the next decision.
