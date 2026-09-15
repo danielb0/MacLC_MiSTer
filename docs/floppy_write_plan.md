@@ -17,11 +17,17 @@ ports over unchanged.
 
 ## 1. Scope
 
-**Stage 1 — GCR only (400K/800K).** Exact MacPlus parity, a coherent shippable
-milestone, and it keeps the first release inside a format whose write semantics
-are already solved on a sister core. 1.44MB/720K MFM stays read-only.
+**RELEASE GATE — owner's ruling 2026-09-15: nothing is released until every
+format is covered.** One PR, one release: GCR *and* MFM, read *and* write *and*
+format. The stage split below is INTERNAL SEQUENCING — the order we build and
+validate in — and is not a shipping plan. Do not describe it as one outside this
+repo; the maintainer has been given the finished format list, not the stages.
 
-**Stage 2 — MFM/ISM writes.** Deferred (§8).
+**Stage 1 — GCR (400K/800K).** Exact MacPlus parity, and it keeps the first
+hardware write run inside a format whose write semantics are already solved on a
+sister core. 1.44MB/720K MFM stays read-only until stage 2.
+
+**Stage 2 — MFM/ISM writes.** §8.
 
 ★ Revised 2026-09-14. The original rationale — *"it carries the one design
 problem that is new to this core"* — is **retired**: UK101 answered that problem
@@ -38,19 +44,83 @@ stronger than the one they replace:
   rotational-position attempt failed *safely* and was caught by the guest's own
   verify; the more plausible-sounding replacement failed *catastrophically*,
   writing through to media and destroying an unrelated sector header.
-- **Shippability.** GCR write is a complete, useful release on its own. Merging
-  makes the anchor's correctness a blocker for shipping *any* write support.
+- ~~**Shippability.**~~ **RETIRED 2026-09-15** by the release gate above — GCR
+  write is not a release on its own any more, so this leg is gone. Risk
+  containment carries the split unaided: the first hardware write run should not
+  also be the first run of an unproven positional anchor.
 
 What the UK101 find DID change is scheduling *within* stage 1: two stage-2
 design decisions are cheap now and expensive to retrofit, so they land in
 Phase 3 even though MFM writes ship later — the identity-bearing staging ring
 and the format-neutral committer.
 
-**Formatting is out of scope in both stages**, as on MacPlus. Low-level format
-needs whole-track writes including address fields, sync gaps and interleave; it
-is materially harder and is not needed to edit files on an already-formatted
-disk. (UK101's `wr_ptr` reset-on-seek makes its FORMAT correct for free — see
-§6.1 — so revisit this once stage 2 lands, but do not plan around it.)
+**Formatting is IN SCOPE, for both formats.** ★ Corrected 2026-09-15. This
+paragraph previously read *"out of scope in both stages, as on MacPlus"* and
+both halves of that were wrong:
+
+- **MacPlus ships formatting.** `../MacPlus_MiSTer` `7712c0e` (2026-09-10 —
+  three days after this plan was first written) landed Erase Disk, hardware
+  confirmed: *"Read, write and a full format have all been confirmed on hardware
+  through the chained drive."* Donor inventory in §1.1.
+- **MFM formatting is not the flux job it sounds like.** The LC's MFM path is
+  BYTE-level: the SWIM does the data separation and the CPU only ever sees
+  decoded bytes plus a mark flag through the ISM FIFO (`rtl/mfm_track_encoder.v`
+  header; `rtl/swim.v:40` "Push data+mark to FIFO", FIFO b8 = MARK at `:164`).
+  A guest format is therefore the CPU pushing `00 x12 / A1 A1 A1 (mark) / FE /
+  C H R N / CRC-16 / 4E …` as plain bytes — a byte-stream state machine plus
+  CRC-16-CCITT, with no flux recovery, no PLL and no bit windows. If anything it
+  is SIMPLER than the GCR decoder, which carries 6:2 nibblization and a
+  three-way checksum chain.
+
+So whole-track address-field writes are the same class of work here as sector
+writes, not a separate discipline. What makes formatting non-trivial on this
+core is not the encoding but the **read-side relay** (§1.1) and the **sidedness
+ceiling** (§1.1) — two defects MacPlus already found and fixed, which we would
+otherwise rediscover on hardware.
+
+(UK101's `wr_ptr` reset-on-seek makes its FORMAT correct for free — see §6.1.)
+
+### 1.1 Donor inventory — MacPlus `7712c0e` (Erase Disk)
+
+Surveyed 2026-09-15. Only the floppy half of that commit is relevant; its
+daisy-chain / HD 20 / `iwm.v` half is Plus-specific and the LC has neither an
+HD 20 nor an IWM chip (it has a SWIM).
+
+| From MacPlus | Lines | Transfer to LC |
+|---|---|---|
+| `rtl/floppy_track_decoder.v` | 384 | **Essentially verbatim.** Machine-independent: raw write-stream bytes + geometry in, verified sectors out. Already reports the address fields a format writes (`amark`, `fmt_mark`, `fmt_ds`) — that *is* its format support. |
+| `rtl/floppy_write_committer.v` | 160 | Ports; LC slot / base-address differences only. |
+| `rtl/floppy_sd_writer.v` | 218 | Ports; same. |
+| `floppy_track_encoder.v` format relay | ~+60 | **Clean port.** Diffed 2026-09-15: our encoder is the same file minus the relay. |
+| Media sidedness (`floppy_loader.v` + `floppy.v`) | ~125 | Concept only — our `floppy_loader.v` is the new block-device one, so this is a re-implementation, not a copy. |
+
+Two defects that commit paid for, which we inherit the fixes to rather than
+rediscovering:
+
+1. **The format relay / `fmt1Err`.** The ROM requires sector 0 to be the first
+   address field it sees after the track is written; a free-running read side
+   fails the format. The encoder must relay the read position to wherever the
+   format actually put sector 0, measured from the address mark the decoder
+   reports.
+2. **The sidedness ceiling.** The address field's format byte was derived from
+   the image file's SIZE, so a One-Sided erase of an 819,200-byte image
+   formatted side 0 and then advertised the disk as double-sided — letting the
+   driver build an 800K volume over a side that was never formatted. Every 3.5"
+   diskette is one medium; 400K vs 800K is a formatting choice and nothing on
+   the diskette records it. `doubleSidedDisk` needs three terms, each a ceiling
+   on the next: drive mechanism, file size, then the medium itself (sniffed from
+   the volume header at load, re-read from the format byte once a format
+   overwrites it).
+
+**Also checked, and no help** (confirming the 2026-09-07 survey in §8 from the
+local copies): `../BBCMicro_MiSTer/rtl/fdc1772/fdc1772.v` stubs the WD1772's
+Write Track outright — `// write track TODO: fake` at `:657` — and the MiSTer
+Atari ST core uses the same file. `../Apple-IIgs_MiSTer/rtl/iwm_flux.v` is
+flux-level but Apple GCR, not MFM. Minimig/Amiga does decode written MFM tracks,
+but to Amiga track layout (sync `$4489`, odd/even bit split, no IDAM and no
+CRC-16), so only the cell-level encoding would transfer and that is exactly the
+layer we do not need. See §8 for why the controller-model cores (`u765.sv`,
+`fdc1772.v`) structurally cannot donate an answer.
 
 ---
 
@@ -344,8 +414,8 @@ the starting design for stage 2, not rediscovered:
    `mfm_stb` into `swim.v`'s **16-deep staging ring**, so the delivered byte and
    the encoder's live position are separated by more than one byte-time by
    design. Capture the sector identity **into the ring alongside the byte**.
-5. **Reset on seek/mount makes FORMAT correct for free** — worth knowing before
-   deciding formatting is permanently out of scope.
+5. **Reset on seek/mount makes FORMAT correct for free** — now load-bearing
+   rather than a curiosity, since formatting is in scope (§1).
 
 ★ Method note carried over: UK101's replay simulator could not see defect 4
 either way, because its reads are atomic. That one came from reading the RTL
@@ -440,7 +510,9 @@ answered.** What remains is implementation against this core's structures, plus
 two pieces UK101 never had to build:
 
 - an **MFM decoder**, the algebraic inverse of `rtl/mfm_track_encoder.v` — a
-  second decoder, not a parameterisation of the GCR one;
+  second decoder, not a parameterisation of the GCR one. ★ 2026-09-15: this is
+  a BYTE-stream parser plus CRC-16-CCITT, not a flux decoder — see §1, which
+  also brings MFM formatting into scope and re-rates this work downward;
 - an **ISM write engine, which does not exist at all today**: `rtl/swim.v:376`
   gates `ism_arm` with WRITE explicitly off, so Mode b4 is a no-op (§2.4).
 
@@ -479,9 +551,14 @@ inverts, where the write splice falls) — already this project's ground truth v
 
 | Stage | Estimate |
 |---|---|
-| Stage 1 — GCR (phases 0–5) | ~3 weeks |
-| Stage 2 — MFM/ISM writes | +1–3 weeks |
-| Formatting | out of scope |
+| Stage 1 — GCR write (phases 0–5) | ~3 weeks |
+| Stage 2 — MFM/ISM write | +1–3 weeks |
+| Formatting, GCR | +2–4 days — port of `7712c0e`'s floppy half (§1.1) |
+| Formatting, MFM | +3–5 days — decoder extension + ISM format sequencing |
+
+★ The release gate (§1) means the deliverable is the SUM of those rows, not the
+first of them. Formatting entered the table on 2026-09-15; it was previously
+listed as out of scope, on a false reading of MacPlus (§1).
 
 Stage 1 is below MacPlus's 3–4 weeks because the decoder, committer and
 SD-writer port over and the validation matrix is smaller (§3); it is not lower
