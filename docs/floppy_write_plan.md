@@ -591,18 +591,71 @@ classes of fault; stage 2 needs both.
      SDRAM holds pure sector data and guest sector N is at SDRAM offset N*512.
      Everything downstream of SDRAM is then format-agnostic. This is right under
      either write policy, so it is not a decision the write side can regret.
-  2. **Stage-1 writes are RAW IMAGES ONLY** (`.dsk`/`.img`). For a raw image
-     sector N is at file offset N*512 = exactly one aligned SD block, so Phase 4
-     never needs a read-modify-write. DC42 images stay mountable and READABLE
-     exactly as today; the write-enable is simply refused for them, alongside
-     the latched `img_readonly`.
-  3. Rationale: 84 is not a multiple of 512, so a DC42 write is *structurally* a
-     two-block RMW with a partial-failure window, and it would land in Phase 4 —
-     the phase that first touches the user's file. DC42 is a distribution format
-     that is overwhelmingly read. The cost/benefit is not close.
-  ★ Consequence to carry into Phase 3: the OSD write-enable must be ANDed with
-  "this slot mounted a RAW image", not only with `img_readonly`. A DC42 mount
-  must present as write-protected.
+  2. ~~**Stage-1 writes are RAW IMAGES ONLY**~~ **REVERSED 2026-09-15 — DC42 IS
+     WRITABLE.** Owner's ruling, taken live and unambiguously: every format we
+     can read, we can write. Dani's question on the forum was exactly "which
+     file formats will you support writing", and the answer given is "all
+     currently supported formats" — so this is now a commitment, not a
+     preference.
+
+     ⚠ **Provenance note, because it matters for how much weight the old
+     decision carried.** §6.2 and commit `4007848` both recorded the raw-only
+     choice as "owner's call, 2026-09-14". On 2026-09-15 the owner said he had
+     no memory of discussing it. It cannot be verified either way from here —
+     both records are a previous session's own claim. **Lesson: do not write
+     "owner's call" into a doc or a commit message unless the owner actually
+     said it in that session.** An unverifiable attribution is worse than none,
+     because it silently converts a proposal into a settled decision that
+     nobody feels able to revisit.
+
+  3. **What DC42 writes actually cost.** The load-normalises decision (item 1)
+     does most of the work for free: SDRAM holds pure sector data, so guest
+     sector N is at SDRAM offset N*512 **whatever the container was**.
+     Therefore:
+     - **Phases 3a/3b need NOTHING.** Volatile (SDRAM-only) writes are already
+       container-agnostic. DC42 works there the moment the write-protect term
+       is dropped.
+     - **Only Phase 4 — the SD write-back — is affected.**
+
+     And the misalignment is far more tractable than "84 is not a multiple of
+     512" suggests, because the offset is CONSTANT. Guest sector N sits at file
+     byte `84 + N*512`; dividing by 512 gives block N with a remainder of
+     exactly 84, for every N. So a DC42 sector write is always:
+     - bytes 84..511 of **block N** (428 bytes), and
+     - bytes 0..83 of **block N+1** (84 bytes).
+
+     One fixed 428/84 split, never a variable one. The RMW is a known shape, not
+     a general case.
+
+  4. **The real work is the partial-failure window, and the header checksums.**
+     - *Partial failure*: block N lands and block N+1 does not, leaving a sector
+       torn across two blocks. It reads back self-consistently, which is the
+       dangerous kind. Needs the same never-retire/re-present discipline §7
+       item 2 demands of the SD writer.
+     - ★ **The DC42 header carries data and tag checksums, and they cannot be
+       updated incrementally.** The algorithm is `sum = ror32(sum + word)` over
+       the whole payload — every word's contribution depends on its position, so
+       changing one sector invalidates the running sum from there on.
+       `scripts/mk_dc42.py` implements it and was verified against four
+       known-good images. Three options, to be decided before Phase 4:
+       (a) leave the checksums stale — most emulators never check them, but
+           `mk_dc42.py`'s own verifier and real DiskCopy would flag the image;
+       (b) recompute on eject/unmount by re-reading the payload (819200 bytes
+           for an 800K image — cheap, and it happens once per session);
+       (c) zero the fields.
+       (b) is the honest one and is the current recommendation.
+     - *Tags*: the guest's GCR stream carries the 12 tag bytes per sector and the
+       decoder currently drops them. A DC42 with a tag section has somewhere to
+       put them. Writing them is optional; NOT writing them leaves the tag
+       section stale, which is another reason (b) above must recompute the tag
+       checksum too, or leave both stale consistently.
+
+  ★ Consequence for Phase 3: `flp_int_wp` in `MacLC.sv` currently reads
+  `~status[14] || flp_int_ro || !flp_int_raw`. **The `!flp_int_raw` term comes
+  out** — it is the reversed decision, and it is the only code implementing it.
+  Left alone until the in-flight Phase 3a fit finishes (no edits during a
+  build); it lands with Phase 3b. `raw_img` stays plumbed, because Phase 4 needs
+  to know which layout to write.
 - **The media-change machinery is all keyed off download start/end** —
   `DSK_EMPTY_CY` (`MacLC.sv:2434`), CSTIN, `disk_switched`, and the `.dsk`/
   `.img` index-nibble compare — and must be re-derived from
@@ -715,6 +768,7 @@ inverts, where the write splice falls) — already this project's ground truth v
 | Stage 2 — MFM/ISM write | +1–3 weeks |
 | Formatting, GCR | +2–4 days — port of `7712c0e`'s floppy half (§1.1) |
 | Formatting, MFM | +3–5 days — decoder extension + ISM format sequencing |
+| DC42 write-back (Phase 4) | +2–3 days — the fixed 428/84 two-block RMW, the torn-write guard, and a checksum policy (§6.2 item 4). Added 2026-09-15 when DC42 writes came into scope. |
 
 ★ The release gate (§1) means the deliverable is the SUM of those rows, not the
 first of them. Formatting entered the table on 2026-09-15; it was previously
