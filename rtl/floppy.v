@@ -61,6 +61,20 @@
 `define DRIVE_REG_DRVIN		15 /* R: 400K/800k: drive present (0=yes, 1=no), Superdrive: disk capacity (0=HD, 1=DD) */
 
 module floppy
+#(
+	// ★ 0 strips the ENTIRE write path: engine, decoder, committer, anchors.
+	// The external drive never has media and has writeProtect tied high, so its
+	// write path can never do anything -- but instantiated it still costs a
+	// decoder. The Phase 3a fit made that visible as Quartus Warning 18550,
+	// "implemented as ROM because the write logic is always disabled", and it
+	// was about 1 M10K at 92% M10K utilisation. Unlike removing the floppyExt
+	// INSTANCE (which 410a064 deliberately kept, because it changes what the
+	// Sony driver sees when it probes drive 2), this changes nothing
+	// drive-visible: with WRITE_SUPPORT=0 the drive still answers every
+	// register exactly as before, it simply cannot accept a byte -- which it
+	// could not anyway.
+	parameter WRITE_SUPPORT = 1
+)
 (
 	input clk,
 	input cep,
@@ -91,10 +105,20 @@ module floppy
 	output       writeBusy,      // 1 = buffer full, the CPU must wait
 	                             // (swim.v inverts it for _iwmBusy)
 	output       writeUnderrun,  // 1 = a byte in flight was abandoned
-	// The Phase 2 contract tuple: witness now, Phase 4's committer input later.
+	// The Phase 2 contract tuple, as a witness. The committer consumes it
+	// internally; these exist so the cone has a load and so a HUD can see it.
 	output        wrSecValid,
 	output [3:0]  wrSecNum,
 	output [21:0] wrSecAddr,
+	// SDRAM write port for committed sectors (Phase 3b). Same LEVEL protocol as
+	// floppy_loader.v's. wrSdAddr is an image BYTE offset, matching dskReadAddr
+	// on the read side; the caller adds the image base and halves it for the
+	// word-addressed download port, so only one place knows where images live.
+	output [21:0] wrSdAddr,
+	output [15:0] wrSdData,
+	output        wrSdReq,
+	input         wrSdAck,
+	output        wrCommitDone,   // 1-clk pulse: a sector reached SDRAM
 	
 	input advanceDriveHead,  // prevents overrun when debugging, does not exist on a real Mac!
 	output reg newByteReady,
@@ -741,11 +765,27 @@ module floppy
 	// write drive registers
 	wire [2:0] driveWriteAddr = {ca1,ca0,SEL};
 
-	// ★ The GCR write path lives HERE, below driveWriteAddr/lstrbEdge, and not
-	// up with the rest of the datapath, because it READS them. Verilog would
-	// otherwise implicitly declare driveWriteAddr as a 1-BIT net at the point
-	// of use and silently truncate the 3-bit eject compare -- an eject that
-	// never matches, and so a write path that is never reset by one.
+	generate
+	if (WRITE_SUPPORT) begin : wrpath
+
+	// The GCR write path lives HERE, below driveWriteAddr/lstrbEdge, because it
+	// reads them and declaring before use is the clearer order.
+	//
+	// ★ CORRECTION 2026-09-15: an earlier version of this comment claimed that
+	// placing it ABOVE would make Verilog implicitly declare driveWriteAddr as a
+	// 1-BIT net and silently truncate the 3-bit eject compare. That is WRONG for
+	// this case and the file disproves it: the dbg_media block ~20 lines above
+	// driveWriteAddr's declaration does exactly that compare, and it has been
+	// hardware-validated since 2026-08-06 -- ejects work. Verilog resolves a
+	// forward reference to a net DECLARED LATER in the same module, and this
+	// codebase does it in ~82 places.
+	//
+	// The real hazard is the neighbouring one: an identifier NEVER declared
+	// anywhere gets an implicit 1-bit net, and THAT truncates silently. Verilator
+	// catches it as Warning-IMPLICIT (sim.v's `selectASC` is a live example);
+	// Quartus does not necessarily. So declare-before-use is style, not a
+	// correctness fix -- but a typo'd signal name is a real bug, and the
+	// IMPLICIT warning is the thing to watch.
 	// ================================================================
 	// GCR write path (plan Phase 3). Ported from MacPlus_MiSTer rtl/floppy.v,
 	// which is hardware-proven; the LC-specific parts are marked below.
@@ -842,7 +882,7 @@ module floppy
 
 	wire wrSecReject, wrSecAmark, wrSecFmtMark, wrSecFmtDs;
 	wire [3:0] wrSecAmarkSector;
-	wire [8:0] wrBufAddr = 9'd0;   // Phase 4's committer drives this
+	wire [8:0] wrBufAddr;          // driven by the committer below
 	wire [7:0] wrBufData;
 
 	floppy_track_decoder dec
@@ -868,6 +908,37 @@ module floppy
 
 		.buf_addr     ( wrBufAddr ),
 		.buf_data     ( wrBufData )
+	);
+
+	// Declared before the instance that reads them. Style, not a fix -- see the
+	// correction above the write path: a forward reference to a net declared
+	// later in the same module resolves correctly.
+	wire        wrCommitBusy;
+	wire [21:0] wrCommitAddr;
+
+	// ── Commit a verified sector to the SDRAM image (Phase 3b) ──────────────
+	// Volatile ONLY: this reaches SDRAM, never the SD card. The guest's own
+	// read-after-write verify is what makes that useful -- and it is also the
+	// gate, because a Finder copy completes only if every sector decoded
+	// byte-exactly (sector number, address, and all 512 payload bytes).
+	floppy_write_committer wc
+	(
+		.clk            ( clk ),
+		.rst            ( !_reset || writePathReset ),
+
+		.sector_valid   ( wrSecValid ),
+		.sector_addr    ( wrSecAddr ),
+		.buf_addr       ( wrBufAddr ),
+		.buf_data       ( wrBufData ),
+
+		.wr_addr        ( wrSdAddr ),
+		.wr_data        ( wrSdData ),
+		.wr_req         ( wrSdReq ),
+		.wr_ack         ( wrSdAck ),
+
+		.busy           ( wrCommitBusy ),
+		.done           ( wrCommitDone ),
+		.committed_addr ( wrCommitAddr )
 	);
 
 	// ── Write-path cone anchor ──────────────────────────────────────────────
@@ -906,10 +977,27 @@ module floppy
 		//  2 + 1+1+1+1 + 4 + 22 = 32
 		wr_anchor1 <= {2'b0, wrSecValid, wrSecAmark, wrSecFmtMark, wrSecFmtDs,
 		               wrSecAmarkSector, wrSecAddr};
-		// pins the decoder's buffer READ cone, which nothing else loads until
-		// Phase 4's committer walks it.  24 + 8 = 32
-		wr_anchor2 <= {24'b0, wrBufData};
+		// the committer's own cone: its drain state and where it last landed.
+		//  1 + 1 + 8 + 22 = 32
+		wr_anchor2 <= {wrCommitBusy, wrCommitDone, wrBufData, wrCommitAddr};
 	end
+
+	end else begin : no_wrpath
+		// Everything above is absent. The drive still answers every
+		// register identically -- WRTPRT reads locked because
+		// writeProtect is tied high for this instance -- it simply has
+		// no machinery to accept a byte it could never accept anyway.
+		assign writeBusy     = 1'b0;   // -> _iwmBusy reads 1, "buffer empty"
+		assign writeUnderrun = 1'b0;   // -> _writeUnderrun reads 1, "no underrun"
+		assign wrSecValid    = 1'b0;
+		assign wrSecNum      = 4'd0;
+		assign wrSecAddr     = 22'd0;
+		assign wrSdAddr      = 22'd0;
+		assign wrSdData      = 16'd0;
+		assign wrSdReq       = 1'b0;
+		assign wrCommitDone  = 1'b0;
+	end
+	endgenerate
 
 	
 	// DRIVE_REG_DIRTN		0  /* R/W: step direction (0=toward track 79, 1=toward track 0) */

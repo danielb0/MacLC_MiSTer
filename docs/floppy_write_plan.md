@@ -471,12 +471,23 @@ Three things worth carrying forward:
   byte time it would hand over a second byte — unreachable here, since an
   E-paced VPA access is ~1.23 us against a 15.75 us byte time. Recorded rather
   than asserted against.)
-- **Placement in `floppy.v` is load-bearing.** The write block sits BELOW
-  `driveWriteAddr`/`lstrbEdge` because it reads them. Placed above, Verilog
-  implicitly declares `driveWriteAddr` as a 1-BIT net at the point of use and
-  silently truncates the 3-bit eject compare — an eject that never matches, and
-  so a write path never reset by one. This was caught by reading declaration
-  order, not by any tool.
+- ~~**Placement in `floppy.v` is load-bearing.**~~ **RETRACTED 2026-09-15 — this
+  was wrong, and it is recorded rather than deleted because the wrong version
+  was reported as a caught bug.** The claim was that putting the write block
+  above `driveWriteAddr` would make Verilog implicitly declare it a 1-BIT net
+  and silently truncate the 3-bit eject compare. `floppy.v` itself disproves it:
+  the `dbg_media` block does exactly that compare ~20 lines ABOVE
+  `driveWriteAddr`'s declaration, and it is hardware-validated (2026-08-06, and
+  ejects worked on hardware again today). A forward reference to a net
+  **declared later in the same module** resolves correctly; a scan found ~82 of
+  them across `floppy.v`, `swim.v`, `MacLC.sv` and `dataController_top.sv`, in
+  code that ships. Declare-before-use is better style and the blocks were left
+  in their moved positions, but it is not a correctness fix.
+  ★ The REAL hazard is adjacent and worth keeping: an identifier **never
+  declared anywhere** does get an implicit 1-bit net, and that truncates
+  silently. Verilator flags it as Warning-IMPLICIT (`selectASC` in `sim.v` is a
+  live example); Quartus need not. So the thing to watch is a mistyped signal
+  name, not declaration order.
 - **The decoder needs an anchor or it does not exist in the fit.** Nothing
   consumes the tuple until Phase 4, so synthesis sweeps the whole decoder away;
   it would then appear for the first time in the same fit as the committer and

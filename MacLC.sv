@@ -2230,6 +2230,10 @@ module emu
 	// exist: used before any declaration, SystemVerilog would implicitly
 	// create a 1-bit net here and the later `wire ... =` would collide.
 	wire flp_int_wp;
+	wire [21:0] wc_addr;      // image BYTE offset from the committer
+	wire [15:0] wc_data;
+	wire        wc_req, wc_done;
+	wire        wc_ack;
 
 	dataController_top dataController (
 		.clk32(clk_sys),
@@ -2316,6 +2320,9 @@ module emu
 		// the state the Sony driver's benign -65 polling already covers.
 		.insertDisk({1'b0, dsk_int_ins}),
 		.writeProtect({1'b1, flp_int_wp}),   // drive 2 has no media: always locked
+		.wrSdAddr(wc_addr), .wrSdData(wc_data),
+		.wrSdReq(wc_req),   .wrSdAck(wc_ack),
+		.wrCommitDone(wc_done),
 		.diskSides({1'b0, dsk_int_ds}),
 		.diskMFM({1'b0, dsk_int_mfm}),
 		.diskHD({1'b0, dsk_int_hd}),
@@ -2523,10 +2530,12 @@ module emu
 	// Write-protect, three terms, any one of which locks the disk:
 	//   - the OSD Floppy Write toggle is Off (default, and the safe state),
 	//   - the slot was mounted read-only (latched at ITS OWN mount pulse), or
-	//   - the image is not RAW. A DC42's 84-byte header is not sector-aligned,
-	//     so writing one is structurally a two-block read-modify-write with a
-	//     partial-failure window (plan section 6.2). DC42 stays readable.
-	assign flp_int_wp = ~status[14] || flp_int_ro || !flp_int_raw;
+	// DC42 is NOT excluded (owner's ruling 2026-09-15, plan section 6.2): the
+	// load path normalises the container away, so SDRAM holds pure sector data
+	// and a volatile write is container-agnostic. Only Phase 4's write-BACK to
+	// the file has to care which layout it is writing, and raw_img is still
+	// plumbed for exactly that.
+	assign flp_int_wp = ~status[14] || flp_int_ro;
 
 	// the floppy never writes to the SD card in Phase 3 -- see the plan: the
 	// handshake gets its own hardware run before anything can reach the file.
@@ -2617,21 +2626,64 @@ module emu
 	// start with the CPU in reset, and a loader that collides simply stalls
 	// with its request still up, which the LEVEL handshake tolerates.
 	//
-	// ★ The locking round-robin grant that stood here until 2026-09-15 existed
-	// only because there were TWO loaders: without a lock, the internal loader
-	// raising a request mid-word would steal the port from the external one and
-	// abandon its in-flight word — the class of bug the dl_* port comment in
-	// rtl/sdram.v describes, where a handshake torn down between RAS and CAS
-	// silently drops a word from the image. With one loader there is nothing to
-	// steal the port, so the select is just "not a ROM download". Restore the
-	// lock if a second loader is ever added back.
-	wire dl_int_sel = !dio_download;
+	// ★ THE LOCK IS BACK (Phase 3b, 2026-09-15), because there is a second
+	// non-ROM requester again: the write committer. The comment that stood here
+	// said "restore the lock if a second loader is ever added back", and that is
+	// this. Without it, one requester raising wr_req while the other is mid-word
+	// steals the port and abandons the in-flight word — the class of bug the
+	// dl_* port comment in rtl/sdram.v describes, where a handshake torn down
+	// between RAS and CAS silently drops a word from the image. A dropped word
+	// is one 512-byte sector with two wrong bytes, which the guest's verify
+	// would report as a disk error and which a byte-diff would find much later.
+	//
+	// The loader and the committer are very nearly exclusive in practice (the
+	// loader runs at mount, and a mount resets the write path), but "very nearly"
+	// is not a thing to arbitrate on: a committer mid-drain when a new image is
+	// mounted is exactly the overlap, and it is reachable.
+	//
+	// ★ Reset added this time. The previous arbiter had none — noted as known
+	// sloppiness when it was removed. Cyclone V powers registers up at 0, so it
+	// was probably harmless, but "probably" on the port that writes the disk
+	// image is not worth keeping.
+	localparam DLG_LDR = 1'b0;   // the mount-time loader
+	localparam DLG_WC  = 1'b1;   // the write committer
+	reg  dl_grant;
+	reg  dl_locked;
+	always @(posedge clk_sys) begin
+		if (!pll_locked_s) begin
+			dl_grant  <= DLG_LDR;
+			dl_locked <= 1'b0;
+		end else if (dio_download) begin
+			dl_locked <= 1'b0;          // a ROM download outranks both
+		end else if (dl_locked) begin
+			// hold the grant for as long as the winner keeps its request up
+			if ((dl_grant == DLG_LDR && !flp_int_wr_req) ||
+			    (dl_grant == DLG_WC  && !wc_req))
+				dl_locked <= 1'b0;
+		end else if (flp_int_wr_req) begin
+			dl_grant <= DLG_LDR; dl_locked <= 1'b1;
+		end else if (wc_req) begin
+			dl_grant <= DLG_WC;  dl_locked <= 1'b1;
+		end
+	end
 
-	wire        dl_req_mux  = dio_download ? ioctl_wait  : flp_int_wr_req;
-	wire [23:0] dl_addr_mux = dio_download ? {1'b0, dio_a[22:0]} : flp_int_wr_addr;
-	wire [15:0] dl_data_mux = dio_download ? dio_data   : flp_int_wr_data;
+	wire dl_ldr_sel = dl_locked && (dl_grant == DLG_LDR) && !dio_download;
+	wire dl_wc_sel  = dl_locked && (dl_grant == DLG_WC)  && !dio_download;
 
-	wire flp_int_wr_ack = sdram_dl_ack && dl_int_sel;
+	// The committer emits an image BYTE offset (the dskReadAddr convention);
+	// the port is word-addressed, so halve it and add the image base here — the
+	// one place that knows where the floppy image lives.
+	wire [23:0] wc_word_addr = 24'h600000 + {3'd0, wc_addr[21:1]};
+
+	wire        dl_req_mux  = dio_download ? ioctl_wait :
+	                          dl_wc_sel    ? wc_req     : flp_int_wr_req;
+	wire [23:0] dl_addr_mux = dio_download ? {1'b0, dio_a[22:0]} :
+	                          dl_wc_sel    ? wc_word_addr        : flp_int_wr_addr;
+	wire [15:0] dl_data_mux = dio_download ? dio_data :
+	                          dl_wc_sel    ? wc_data  : flp_int_wr_data;
+
+	wire flp_int_wr_ack = sdram_dl_ack && dl_ldr_sel;
+	assign wc_ack       = sdram_dl_ack && dl_wc_sel;
 
 	// (Floppy-download acceptance counters removed 2026-07-16 with their PFL1
 	// sel-3 readout — recover from git history with the floppy probes.)

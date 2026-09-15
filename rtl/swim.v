@@ -73,6 +73,14 @@ module swim
 	output [1:0] diskEject,
 	input [1:0] diskSides,
 	input [1:0] diskMFM,    // disk is MFM-format (ISM path): {ext,int}
+	// Committed-sector SDRAM write port, INTERNAL DRIVE ONLY. The external
+	// drive is built with WRITE_SUPPORT=0 (see its instantiation), so it has
+	// no committer to arbitrate with and none of this is per-drive.
+	output [21:0] wrSdAddr,
+	output [15:0] wrSdData,
+	output        wrSdReq,
+	input         wrSdAck,
+	output        wrCommitDone,
 	input [1:0] writeProtect, // 1 = this drive refuses writes: the OSD write
 	                        // enable is off, the slot mounted read-only, or it
 	                        // mounted a DC42 (plan section 6.2 -- a DC42 write
@@ -316,6 +324,11 @@ module swim
 		.wrSecValid(),
 		.wrSecNum(),
 		.wrSecAddr(),
+		.wrSdAddr(wrSdAddr),
+		.wrSdData(wrSdData),
+		.wrSdReq(wrSdReq),
+		.wrSdAck(wrSdAck),
+		.wrCommitDone(wrCommitDone),
 		.readData(readDataInt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyInt),
@@ -358,7 +371,10 @@ module swim
 		.dbg_mfm_stall_cnt(dbg_mfm_stall[7:0])
 	);
 
-	floppy floppyExt
+	// ★ WRITE_SUPPORT(0): the LC has no external floppy port and this drive
+	// never has media, so its write path could never fire. Instantiated it
+	// still cost a decoder -- see the parameter's comment in floppy.v.
+	floppy #(.WRITE_SUPPORT(0)) floppyExt
 	(
 		.clk(clk),
 		.cep(cep),
@@ -379,6 +395,11 @@ module swim
 		.wrSecValid(),
 		.wrSecNum(),
 		.wrSecAddr(),
+		.wrSdAddr(),
+		.wrSdData(),
+		.wrSdReq(),
+		.wrSdAck(1'b0),
+		.wrCommitDone(),
 		.readData(readDataExt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyExt),

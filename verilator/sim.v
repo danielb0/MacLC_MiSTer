@@ -966,6 +966,11 @@ module emu
 		// the core's power-on default. The write path is exercised by its own
 		// bench (tb_floppy_write.v), not through the full-system boot.
 		.writeProtect(2'b11),
+		// The committer has nowhere to go in sim: this top has no download-port
+		// arbiter, and writeProtect above means it can never be handed a sector
+		// anyway. Its own bench (tb_floppy_commit.v) drives it properly.
+		.wrSdAddr(), .wrSdData(), .wrSdReq(), .wrSdAck(1'b0),
+		.wrCommitDone(),
 		.diskHD({1'b0, dsk_int_hd}),
 		.diskEject(diskEject),
 		.dskReadAddrInt(dskReadAddrInt),
