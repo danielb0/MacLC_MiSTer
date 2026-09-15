@@ -312,8 +312,12 @@ Phase 2's RTL decoder:
   data bytes, not their own. This is the bug MacPlus shipped first and caught
   only by round-tripping against RTL — not by reading the Verilog.
 
-### Phase 1 — Convert floppies to block devices (still read-only)
+### Phase 1 — Convert floppies to block devices (still read-only) — **COMPLETE 2026-09-15**
 *The riskiest plumbing change, isolated from any write behaviour.*
+
+**Gate result: PASS, on hardware, on a STOCK Main.** Every item below was run;
+details in "Gate progress".<br>
+Code: `2fff730` + `85bdf83` + `410a064`.
 
 - CONF_STR: `F1`/`F2` → `S` mount slots; widen `VDNUM` from 6, keeping every
   existing device on its current index so users' saved mounts are undisturbed.
@@ -328,11 +332,13 @@ Phase 2's RTL decoder:
 800K, GCR and MFM, DC42 and raw, eject and remount, floppy + SCSI together. No
 write behaviour introduced. A regression here is provably plumbing.
 
-**Gate progress (2026-09-15).** "Both drives" is moot since `410a064` removed
-the phantom second floppy.
+**Gate progress (2026-09-15) — ALL ITEMS PASS.** "Both drives" is moot since
+`410a064` removed the phantom second floppy.
 - ✅ **Boots from floppy** — raw 800K GCR, System 6.0.8 System Tools.
 - ✅ **Mounts** — 400K GCR, 800K GCR and 1.44MB MFM, DC42 *and* raw.
-- ⬜ **Eject and remount** (media change) — the last item. ★ Run it
+- ✅ **Eject and remount** (media change) — several disks mounted and
+  unmounted in succession, all correct. No ghost volume, no stuck `SWITCHED`.
+  ★ Run it
   **guest-eject-first**, and **not against the boot floppy**: per CLAUDE.md,
   swapping under a live volume is hostile on a real Mac too (MAME 6.0.8 bombs
   with "Disk Initialization package not present" when the boot floppy is
