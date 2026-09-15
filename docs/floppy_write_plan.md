@@ -268,7 +268,18 @@ MacPlus's `sim/` artifacts ported over. **The "confirm, do not assume" check
 was done and is the strongest single result here: `rtl/floppy_track_encoder.v`
 is BYTE-IDENTICAL between the two cores** (plain `diff`, zero differences), so
 the ported decoder inherits MacPlus's validation rather than merely resembling
-it. Re-run that diff before trusting any of this again. Two deliberate
+it. Re-run that diff before trusting any of this again.
+
+★ **UPDATE 2026-09-15 — the two files are no longer byte-identical, and the
+claim above still holds.** MacPlus `7712c0e` added the format relay to its
+encoder (§1.1), so a plain `diff` now reports 76 changed lines. Re-checked
+line by line: **every one of them is inside the relay block** (the `wr_*`
+ports, the `relay_*` registers, `STATE_GAP`, `rev_len`/`SECTOR_BYTES`) or is
+trailing whitespace. Ours is MacPlus's file MINUS the relay, so the stream
+this core emits is unchanged and the inheritance is intact. The right check
+from here is therefore not `diff` but `diff -w` filtered for relay lines — or
+simply the Phase 2 round-trip, which tests the property directly rather than
+by proxy. Two deliberate
 departures from MacPlus's artifact list:
 
 - **`encoder_model.py` was NOT ported.** Its job there was to prove a Python
@@ -317,17 +328,75 @@ Phase 2's RTL decoder:
 800K, GCR and MFM, DC42 and raw, eject and remount, floppy + SCSI together. No
 write behaviour introduced. A regression here is provably plumbing.
 
-### Phase 2 — GCR decoder RTL
-Port `rtl/floppy_track_decoder.v` from MacPlus.
+### Phase 2 — GCR decoder RTL — **COMPLETE 2026-09-15**
 
-Define its output as a `(track, side, sector, 512-byte buffer, valid)` **contract**
-rather than anything GCR-shaped: Phase 3's committer consumes that tuple, and
-stage 2's MFM decoder must be able to present the same one (§1).
+**Gate result: PASS.** `verilator/tb_floppy_track_decoder.v` drives the real
+`rtl/floppy_track_encoder.v` into the real `rtl/floppy_track_decoder.v`:
+**6269 checks green over all 160 track/side combinations**, 4000 sector
+acceptances (25 per track = 2+ revolutions each), covering all
+16×(12+11+10+9+8)×2 = **1600 distinct sectors byte-exactly**, plus six negative
+cases. Runs on Icarus 12.0 natively — ~2m38s for the sweep, ~20 s for the
+default representative 8 tracks. Build + run lines are in the bench header.
 
-**Gate (sim):** RTL encoder → RTL decoder round-trip recovers every sector of a
-synthetic 800K image byte-exactly, plus the three negative cases. Insist on
-RTL-to-RTL rather than against the Python model: it proves consistency with the
-exact stream THIS core produces.
+`rtl/floppy_track_decoder.v` is a **verbatim** port (source md5
+`6fcd1267e0d1765847c7d1009763848a`); only a provenance header was added. That is
+the whole value of the port — this core's encoder is MacPlus's file minus the
+format relay (**re-diffed 2026-09-15: every differing line is inside the relay
+block**, so Phase 0's inheritance claim still holds even though the two files
+are no longer byte-identical), so the decoder is the algebraic inverse of the
+exact stream we emit and arrives already validated on a sister core.
+
+**Two independent positive checks**, both riding on
+`scripts/gcr_gen_image.py`'s self-identifying pattern (bytes 0..2 of a sector
+are track, side, sector):
+1. `recovered[0..2]` == the (track, side, sector) the bench is driving — proves
+   the decoded PAYLOAD is this sector's data, using no address at all.
+2. `recovered[k] == mem[addr + k]` for all 512 — proves `addr` lands on exactly
+   this sector. **This is the check Phase 3's committer rides on.** A generic
+   counter pattern would let a wrong-address fetch pass it; this one cannot.
+
+**Format neutrality — decided, and it is the opposite of the obvious reading.**
+The GCR geometry (`soff`/`spt`, the variable-speed zones) stays INSIDE the
+decoder rather than moving to the committer. Putting `addr` in the committer
+would force the committer to hold a geometry table per format — i.e. make it
+format-AWARE, exactly what the §1 carve-out exists to prevent. So the contract
+Phase 3 consumes is **`(sector_valid, sector, addr, buf)`**, with `track`/`side`
+as decoder inputs, and stage 2's MFM decoder presents the same tuple while
+computing its own flat 18-sector geometry.
+
+**A behavioural difference from the Phase 0 Python decoder, where the RTL is
+the one that is right** — recorded because it will look like a bug to the next
+reader. Corrupting an ADDRESS field's checksum makes the Python decoder lose
+the sector (it pairs an address field with the data field that follows it). The
+RTL scans for `D5 AA AD` independently and takes the sector number from the
+DATA field, which carries its own checksum — so the sector still decodes and
+only `fmt_mark` is suppressed. That independence *is* the §4 property stage 1
+rests on: no positional inference anywhere. The bench asserts the RTL behaviour
+explicitly (case 6) so nobody later "fixes" it into agreement with Python.
+
+Negative cases, each naming the sector that must vanish while every other
+sector survives byte-intact (the Phase 0 standard, not MacPlus's "an error was
+reported somewhere near here"): corrupt payload byte → a different VALID GCR
+code, corrupt checksum byte → likewise, an invalid nibble, a broken `DE AA`
+trailer, a stream cut mid-field, and the address-checksum case above. Corruption
+values are taken FROM the captured stream rather than from a copy of the forward
+table, so the bench cannot drift from the encoder's table. ★ All negative runs
+are **one revolution only** — a 20000-byte capture holds 2+ revolutions, so
+corrupting one copy of a sector leaves the other to be "recovered", a test that
+passes while proving nothing. Same trap as Phase 0.
+
+★ **`rtl/floppy_track_decoder.v` is deliberately NOT in `files.qip` yet.**
+Phase 3 adds it, when it is first instantiated. Adding dead RTL now would
+perturb the Quartus warning baseline that §7 defect 1 tells us to diff compile
+over compile, for no gain.
+
+★ Bench bug worth remembering (cost one debug cycle): `integer corrupt_idx`
+powers up **x**, and `x >= 0` is x, so the injector's ternary fed the decoder x
+for the entire run. The symptom was a perfect "the decoder detects nothing" —
+zero sectors, zero rejects, zero address marks, on every track — which reads as
+a broken DUT rather than a broken bench. An uninitialised `integer` in a
+comparison is the same class of hazard as the `#1` edge discipline: it fails
+silently and blames the wrong module.
 
 ### Phase 3 — IWM write path, volatile writes only
 *The "will the ROM cooperate" gate. Structurally cannot touch the user's file.*
