@@ -328,6 +328,32 @@ Phase 2's RTL decoder:
 800K, GCR and MFM, DC42 and raw, eject and remount, floppy + SCSI together. No
 write behaviour introduced. A regression here is provably plumbing.
 
+**Gate progress (2026-09-15).** "Both drives" is moot since `410a064` removed
+the phantom second floppy.
+- ✅ **Boots from floppy** — raw 800K GCR, System 6.0.8 System Tools.
+- ✅ **Mounts** — 400K GCR, 800K GCR and 1.44MB MFM, DC42 *and* raw.
+- ⬜ **Eject and remount** (media change) — outstanding.
+- ⬜ **Boots from a DC42** — no LC-bootable DC42 existed to test with (every
+  one to hand is 1985-87 era, a non-bootable application disk, or truncated),
+  so `scripts/mk_dc42.py` mints one from the raw disk that is known to boot.
+  Same payload, byte-identical, so raw-vs-DC42 is an exact A/B and the only
+  variable is the 84-byte strip.
+
+★ Watch the **tag section** when making DC42 fixtures. A DC42 may legally carry
+`tagSize` 0, and an 800K image built that way has a payload of exactly 819200
+bytes — which *passes* the raw size test, masking a regression to size-based
+geometry with the very image meant to catch it. `mk_dc42.py` therefore always
+writes the tags (zero-filled; HFS does not read them), giving the 838400-byte
+payload that matches no size test.
+
+★ **Four of the 19 DC42 images on the owner's machine are damaged**, found by
+checksum-verifying them all before choosing a fixture: the three System 2.0.1
+disks have bad data checksums (modified after creation) and
+`Arkanoid_1_00.dsk` is a valid DC42 truncated by exactly 84 bytes — its payload
+is 819116, not a whole number of sectors. Verify a fixture before gating on it;
+a bad image imitates a core bug perfectly. (`Arkanoid_1_00` would make a good
+negative case later.)
+
 ### Phase 2 — GCR decoder RTL — **COMPLETE 2026-09-15**
 
 **Gate result: PASS.** `verilator/tb_floppy_track_decoder.v` drives the real
