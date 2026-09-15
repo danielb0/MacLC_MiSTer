@@ -72,6 +72,44 @@ Full process + gotchas: **`docs/mame_compare.md`** (memory tap, maincpu trace,
 PC-stream divergence diff; macOS has no `timeout`, debugger defaults to the Egret
 HC05 not the 68020, MAME PCs are 8-digit `00Axxxxx`, etc.).
 
+## The Verilator boot gate is NOT a routine gate (our policy, 2026-09-15)
+
+★ **Fork-local policy.** This lives in `danielb0/MacLC_MiSTer` and is ours to
+set; it must NOT travel upstream in a PR — see the PR section below.
+
+**Do not run the 450-frame boot gate as a matter of course.** It costs ~35
+minutes (build + ~4.7 s/frame) and the evidence does not justify that on every
+change: across this repo's whole history it is reported as PASS **16 times and
+has never once caught a regression** — the only commit mentioning it in that
+context says *"The sim never caught it."* None of the MacPlus floppy-write,
+SCSI, CD-ROM, HD20 or formatting work used it at all; that core was developed
+against hardware with JTAG probes.
+
+**What to do instead**, in order:
+1. **The fast unit benches** (Icarus, seconds to a couple of minutes) — these DO
+   catch things, and byte-exactly. `tb_floppy_commit`, `tb_floppy_write`,
+   `tb_floppy_track_decoder`, `tb_disk_swap`, `tb_pds_enet`, `tb_scc_midi`, …
+2. **Quartus analysis & synthesis** as the elaboration check. It is on the path
+   to an RBF anyway, reaches the same conclusion in its first few minutes, and
+   catches strictly MORE than Verilator — notably Error 10028, multiple constant
+   drivers, which Verilator tolerates silently (see the compatibility section).
+3. **Hardware, then JTAG probes** for anything that actually breaks. The chain
+   is live; an empty probe read means a probes-off release fit, not a dead hub.
+
+**When the boot gate IS still worth its 35 minutes:**
+- After ANY change to the **VIA shift register** (`rtl/via6522.sv`) — the
+  Egret section below mandates it, and that failure mode is a silent boot stall
+  rather than something a probe finds quickly.
+- When something has already broken and a **CPU instruction trace** would
+  localise it: `check_boot.sh` names the boot stage reached and says whether the
+  CPU is ADVANCING or spinning, which no screenshot can tell you.
+- Once before a release fit, as a cheap sanity check on the final binary.
+
+★ Note what it never covered anyway: `sim.v` hardwires `writeProtect(2'b11)`, so
+the floppy WRITE path is inert there, and `sim.v` is its own top — it does not
+include `MacLC.sv`. A boot-gate PASS means "the existing machine still boots in
+sim", never "the feature works".
+
 ## PRs and releases — WE are the reviewers
 
 **Treat "merged" as "shipped".** danifunker can cut releases that feed

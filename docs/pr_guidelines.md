@@ -67,6 +67,18 @@ Nobody else is going to run these.
       boot-attach hang fires intermittently on known-good builds.
 - [ ] **Nothing from `scratch/` committed**, and no probe/experiment RBFs in
       `releases/`.
+- [ ] ★ **No FORK-LOCAL POLICY in an upstream PR.** We work in
+      `danielb0/MacLC_MiSTer`, which is ours — we can adopt any policy we like
+      *here*. What must not travel upstream to `MiSTer-devel/MacLC_MiSTer` is
+      our working practice: the boot-gate policy above, this file's own §1-2
+      (reviewer role, merge discipline), and anything else that reads as
+      instructions to the maintainer rather than facts about the core. **The
+      line is the PR boundary, not the repo boundary.** Check the diff for
+      `CLAUDE.md` and `docs/` before opening one; a PR is the moment those
+      commits stop being ours.
+- [ ] **The debug macros are commented** in `MacLC.qsf` — `USE_DBG_PROBES`,
+      `USE_DBG_OBSERVER`, `USE_DBG_HUD`, `USE_ADB_ISSP`, `USE_AUDIO_ISSP`.
+      `USE_DBG_HUD` especially: it paints debug rows over the guest's screen.
 
 ---
 
