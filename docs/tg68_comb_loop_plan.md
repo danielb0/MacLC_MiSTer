@@ -402,6 +402,13 @@ Frozen desktop, mouse alive. Read off the chain (`scratch/tg68loop/`
   Whether it predates the loop fix is UNKNOWN: the PR #5 A/B ran four
   Speedometer passes but no restart afterwards is recorded.
 
+**★ PRE-EXISTING (owner, 2026-09-15 ~22:50): the control build
+`MacLC_2c6c67cd` (PR #5 gated, before the loop fix) hangs under the same
+circumstances.** So this is not the loop fix and not the credit; it is an
+open core issue of its own (heap block header overwritten during a
+Speedometer 4.02 run — see the probe evidence above). Out of scope for this
+plan; tracked separately. Remaining discriminators for THAT investigation:
+
 Discriminators (owner, cheap, in this order):
 1. Previous release RBF (`scratch/tg68loop/control/MacLC_2c6c67cd_PR5_gated.rbf`,
    extracted from `3eb51fb`, the PR #5 gated build, pre-loop-fix) — full Speedometer, then Restart. Hang ⇒ pre-existing.
