@@ -369,8 +369,10 @@ gets its own hardware boot regardless). Three sequential full builds.
 | Seed | STA | Loops | Kernel-internal worst (data / slack vs 61.5 ns) | RBF md5 | Hardware |
 |---|---|---|---|---|---|
 | 4 | met, worst +0.254 ns (hold, CPU PLL clock) | 0 | 30.481 ns / +28.430 (regfile PORT_B_WRITE_ENABLE_REG → regfile_rtl_1_bypass[6]) | 43ea5373 | **PASS** — reboot with CD inserted, Quark typing, benchmarks in the usual ballpark (owner) |
-| 5 | met, worst +0.179 ns (hold, HDMI PLL clock) | 0 | 29.741 ns / +29.517 (same regfile cone, → regfile_rtl_1_bypass[2]) | 94c6d3f0 | pending |
-| 7 | | | | | |
+| 5 | met, worst +0.179 ns (hold, HDMI PLL clock) | 0 | 29.741 ns / +29.517 (same regfile cone, → regfile_rtl_1_bypass[2]) | 94c6d3f0 | booted and ran Speedometer; the restart-after-Speedometer hang (below) hit on it — the B3 items (2 boots, Quark, restart WITHOUT a benchmark first) still to be called |
+| 7 | met, worst +0.247 ns (hold, video PLL clock) | 0 | **32.101 ns** / +29.115 (same regfile cone, → regfile_rtl_1_bypass[6]) — would have FAILED the 32 ns cap by 0.1 ns | b8067040 | pending |
+
+**The spread, measured:** kernel worst path 30.5 / 29.7 / 32.1 ns across seeds 4 / 5 / 7 — a 2.4 ns placement spread that against the 32 ns cap is pass-or-fail by luck (seed 7 would have been rejected) and against the genuine 61.5 ns budget leaves ≥29 ns everywhere. That is the seed roulette, quantified, and what the credit removes — provided the hardware agrees.
 
 Note on seed 4: with the credit the fitter let the kernel relax from 24.8 ns
 (Phase A, under the cap) back to 30.5 ns, exactly the "32-38 ns as STA sees
