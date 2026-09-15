@@ -132,6 +132,49 @@ testing; a byte diff against a pre-change copy is.
 
 ---
 
+## 3a. CODE comments: the MacPlus style does NOT transfer
+
+★ Owner's ruling, 2026-09-15. Section 3 adopts MacPlus's style for the **PR
+body**. It does not adopt its style for **comments in the code**, and the
+distinction matters enough to state plainly, because "use the MacPlus
+guidelines" reads like it covers both.
+
+MacPlus `2abe000` ("Same comment style for the merged code in the files this PR
+touches") deliberately *cut* explanation out of seventeen files — "one-line
+comments on signals and steps, tables for reference data, **no explanatory
+paragraphs, no dated notes**" — turning six-line rationales into two-line
+statements of fact. That was right **there**: the code was going into a foreign
+repo with an established hand, and a PR that reads as two different authors is a
+reason for a reviewer to push back.
+
+**None of that applies here.** This repo is developed by danifunker and by
+Claude. Long comments are not clutter to be trimmed before shipping — they are
+the working documentation, and for an AI-assisted codebase they are what makes a
+cold start possible. So:
+
+- **Keep the paragraphs.** The "why", the alternative that was tried and failed,
+  the hardware finding behind a constant.
+- **Keep the dated notes.** `★ 2026-08-06`, `FIXED 2026-09-15`, `REFUTED` —
+  these carry the provenance that stops a settled question being reopened, and
+  they are exactly what `2abe000` removed.
+- **Keep the never-do-this laws.** The anchor blocks' "never remove, ifdef, or
+  XOR-fold", `via6522.sv`'s SR edge-detection history, the floppy write path's
+  declaration-order note. Each of those is a comment that exists because
+  somebody already lost time to the thing it warns about.
+- **Do not "tidy" a comment block to match surrounding terseness.** In this repo
+  the verbose block is the correct register and the terse neighbour is the
+  legacy one.
+
+The test is not "is this comment long" but **"would deleting it cost someone a
+day"**. CLAUDE.md is largely a distillation of comments like these; where a
+finding is big enough it goes in both.
+
+If code ever *is* sent upstream to another repo, do the `2abe000` trim on that
+branch only, as its own comment-only commit, and verify it decomments identically
+to the original — never on `master` here.
+
+---
+
 ## 4. What not to write
 
 - Anything the testing does not support. "Should work", "in theory", "probably
