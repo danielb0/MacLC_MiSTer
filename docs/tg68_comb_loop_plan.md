@@ -354,3 +354,25 @@ RBF `scratch/tg68loop/MacLC_fix_seed4.rbf` on the DE10-Nano:
   Note the release fit has NO probe instances, so nothing can be read from it.
 
 **Phase A is closed.** Phase B (§4) is the next decision.
+
+---
+
+## 7. Phase B log (2026-09-15, late evening)
+
+Setup: SDC credit restored (`set_multicycle_path -setup -end 2 / -hold -end 1`,
+kernel-internal; the cap kept commented for a one-line revert), observer probe
+deck ON (`USE_DBG_OBSERVER=1` — owner's call: a hang can then be read off the
+chain; the caveat that probe-bearing fits have passed where probes-off fits of
+the same code failed is noted, and the eventual release fit from the PR branch
+gets its own hardware boot regardless). Three sequential full builds.
+
+| Seed | STA | Loops | Kernel-internal worst (data / slack vs 61.5 ns) | RBF md5 | Hardware |
+|---|---|---|---|---|---|
+| 4 | met, worst +0.254 ns (hold, CPU PLL clock) | 0 | 30.481 ns / +28.430 (regfile PORT_B_WRITE_ENABLE_REG → regfile_rtl_1_bypass[6]) | 43ea5373 | **PASS** — reboot with CD inserted, Quark typing, benchmarks in the usual ballpark (owner) |
+| 5 | building | | | | |
+| 7 | | | | | |
+
+Note on seed 4: with the credit the fitter let the kernel relax from 24.8 ns
+(Phase A, under the cap) back to 30.5 ns, exactly the "32-38 ns as STA sees
+them" behaviour the SDC history describes — the difference is that every one of
+those paths is now measured, not estimated, and 30.5 ns is half the real budget.
