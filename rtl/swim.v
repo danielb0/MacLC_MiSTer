@@ -73,6 +73,10 @@ module swim
 	output [1:0] diskEject,
 	input [1:0] diskSides,
 	input [1:0] diskMFM,    // disk is MFM-format (ISM path): {ext,int}
+	input [1:0] writeProtect, // 1 = this drive refuses writes: the OSD write
+	                        // enable is off, the slot mounted read-only, or it
+	                        // mounted a DC42 (plan section 6.2 -- a DC42 write
+	                        // is structurally a two-block RMW). Drives WRTPRT.
 	input [1:0] diskHD,     // disk is 1.44MB HD: {ext,int}
 
 	output [1:0] diskMotor,
@@ -169,16 +173,40 @@ module swim
 	reg ca0, ca1, ca2, lstrb, selectExternalDrive, q6, q7;
 	reg ca0Next, ca1Next, ca2Next, lstrbNext, selectExternalDriveNext, q6Next, q7Next;
 	wire advanceDriveHead; // prevents overrun when debugging, does not exit on a real Mac!
-	reg [7:0] writeData;
 	reg [7:0] readDataLatch;
 	assign dbg_iwm_latch = readDataLatch;  // PFLP live view
-	wire _iwmBusy, _writeUnderrun;
-	assign _iwmBusy = 1'b1; // for writes, a value of 1 here indicates the IWM write buffer is empty
-	assign _writeUnderrun = 1'b1;
+
+	// IWM write handshake (plan Phase 3). These were hardwired to 1 -- "buffer
+	// always empty, never underran" -- which is why unhardwiring WRTPRT and
+	// implementing the handshake had to be the same commit: the ROM's write
+	// primitive polls this in an UNBOUNDED loop, so a disk that advertised
+	// itself writable against the old stub would HANG the machine, not fail
+	// the write (plan section 2.1).
+	wire writeBusyInt, writeUnderrunInt;
+	wire writeBusyExt, writeUnderrunExt;
+	wire _iwmBusy       = ~(selectExternalDrive ? writeBusyExt : writeBusyInt);
+	wire _writeUnderrun = ~(selectExternalDrive ? writeUnderrunExt : writeUnderrunInt);
+
 
 	// floppy disk drives
 	reg diskEnableExt, diskEnableInt;
 	reg diskEnableExtNext, diskEnableIntNext;
+
+	// ★ This block sits BELOW the diskEnable* declarations because it reads
+	// them. A reg cannot be implicitly declared, so referencing one before
+	// its declaration is not a warning you can ignore -- it is tool-defined
+	// behaviour, and Quartus need not agree with Verilator about it.
+	// The CPU's byte goes to the drive UNREGISTERED. A registered copy would
+	// lag writeReq by a cycle (MacPlus's note on the same line). dataRegWrite is
+	// a LEVEL held across the access, so it produces several cen-qualified
+	// writeReq pulses for one CPU write; floppy.v's !writeBusyReg guard is what
+	// collapses those to one byte. !ism_mode because stage 1 is GCR only -- the
+	// ISM write engine does not exist yet (plan section 2.4).
+	wire dataRegWrite = (_cpuRW == 1'b0) && selectSWIM && (_cpuUDS == 1'b0) &&
+	                    !ism_mode && ({q7Next, q6Next} == 2'b11) &&
+	                    (diskEnableExt | diskEnableInt);
+	wire writeReqInt = cen && dataRegWrite && !selectExternalDriveNext;
+	wire writeReqExt = cen && dataRegWrite &&  selectExternalDriveNext;
 	wire newByteReadyInt;
 	wire [7:0] readDataInt;
 	wire senseInt = readDataInt[7]; // bit 7 doubles as the sense line here
@@ -280,7 +308,14 @@ module swim
 		.SEL(effSEL),
 		.lstrb(lstrb),
 		._enable(ism_mode ? ~ism_selonly_int : ~(diskEnableInt & driveSel)),
-		.writeData(writeData),
+		.writeData(dataInLo),          // live bus value, not a register
+		.writeReq(writeReqInt),
+		.writeProtect(writeProtect[0]),
+		.writeBusy(writeBusyInt),
+		.writeUnderrun(writeUnderrunInt),
+		.wrSecValid(),
+		.wrSecNum(),
+		.wrSecAddr(),
 		.readData(readDataInt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyInt),
@@ -336,7 +371,14 @@ module swim
 		.SEL(effSEL),
 		.lstrb(lstrb),
 		._enable(ism_mode ? ~ism_selonly_ext : ~diskEnableExt),
-		.writeData(writeData),
+		.writeData(dataInLo),          // live bus value, not a register
+		.writeReq(writeReqExt),
+		.writeProtect(writeProtect[1]),
+		.writeBusy(writeBusyExt),
+		.writeUnderrun(writeUnderrunExt),
+		.wrSecValid(),
+		.wrSecNum(),
+		.wrSecAddr(),
 		.readData(readDataExt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyExt),
@@ -778,7 +820,6 @@ module swim
 	always @(posedge clk or negedge _reset) begin
 		if (_reset == 1'b0) begin
 			iwmMode <= 0;
-			writeData <= 0;
 			ism_mode <= 0;
 			ism_mode_reg <= 0;
 			ism_setup <= 0;
@@ -827,9 +868,10 @@ module swim
 			// it keys on offset-0xF accesses (F1), see below.
 			if (_cpuRW == 0 && selectSWIM == 1'b1 && _cpuUDS == 1'b0 && !ism_mode) begin
 				if ({q7Next,q6Next} == 2'b11) begin
-					if (diskEnableExt | diskEnableInt)
-						writeData <= dataInLo;
-					else
+					// with a drive enabled the byte belongs to the DRIVE, and it
+					// travels there live via dataRegWrite/dataInLo above rather than
+					// through a register here -- nothing ever read that register.
+					if (!(diskEnableExt | diskEnableInt))
 						iwmMode <= dataInLo[4:0];
 				end
 			end

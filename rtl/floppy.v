@@ -75,6 +75,26 @@ module floppy
 	input _enable, 			
 	input [7:0] writeData,		
 	output [7:0] readData,
+
+	// --- GCR write path (plan Phase 3) -----------------------------------
+	// writeData above is the CPU's byte; it is LIVE from Phase 3 on, having
+	// been declared and never referenced before it (plan section 2.2). swim.v
+	// hands over the UNREGISTERED bus value so it cannot lag writeReq by a
+	// cycle -- the same reason MacPlus passes dataInLo directly.
+	input        writeReq,       // LEVEL, not a pulse, while the CPU writes the
+	                             // IWM data register for this drive. One CPU
+	                             // access spans several cen ticks; the
+	                             // !writeBusyReg guard below is what makes that
+	                             // one byte. MacPlus's hardware-proven shape.
+	input        writeProtect,   // 1 = refuse writes (OSD off / img_readonly /
+	                             // a DC42 mount). Also drives WRTPRT.
+	output       writeBusy,      // 1 = buffer full, the CPU must wait
+	                             // (swim.v inverts it for _iwmBusy)
+	output       writeUnderrun,  // 1 = a byte in flight was abandoned
+	// The Phase 2 contract tuple: witness now, Phase 4's committer input later.
+	output        wrSecValid,
+	output [3:0]  wrSecNum,
+	output [21:0] wrSecAddr,
 	
 	input advanceDriveHead,  // prevents overrun when debugging, does not exist on a real Mac!
 	output reg newByteReady,
@@ -238,7 +258,7 @@ module floppy
 		          // produces. See the disk_switched block below (2026-08-06).
 		~(driveTrack == 7'h00), // TK0: track 0 indicator
 		driveRegs[`DRIVE_REG_MOTORON], // motor on
-		1'b0, // WRTPRT = locked
+		~writeProtect, // WRTPRT: 0 = locked, 1 = write enabled
 		1'b1, // STEP = complete
 		driveRegs[`DRIVE_REG_CSTIN], // disk in drive
 		driveRegs[`DRIVE_REG_DIRTN] // step direction
@@ -720,6 +740,177 @@ module floppy
 		
 	// write drive registers
 	wire [2:0] driveWriteAddr = {ca1,ca0,SEL};
+
+	// ★ The GCR write path lives HERE, below driveWriteAddr/lstrbEdge, and not
+	// up with the rest of the datapath, because it READS them. Verilog would
+	// otherwise implicitly declare driveWriteAddr as a 1-BIT net at the point
+	// of use and silently truncate the 3-bit eject compare -- an eject that
+	// never matches, and so a write path that is never reset by one.
+	// ================================================================
+	// GCR write path (plan Phase 3). Ported from MacPlus_MiSTer rtl/floppy.v,
+	// which is hardware-proven; the LC-specific parts are marked below.
+	//
+	// The CPU hands over one byte at a time through the IWM data register. We
+	// pace those bytes at the SAME 128-cep byte time the read side uses
+	// (diskDataByteTimer, further up), then present each one to
+	// floppy_track_decoder. A checksum-valid sector appears on the Phase 2
+	// contract tuple (wrSecValid / wrSecNum / wrSecAddr).
+	//
+	// ★ NOTHING IS COMMITTED YET. Phase 3 deliberately stops at the handshake,
+	// because a wrong handshake HANGS the machine rather than failing a write:
+	// the ROM's write primitive polls this handshake in an UNBOUNDED loop
+	// (plan section 2.1). So the handshake gets its own hardware run, with the
+	// decoder watching but no path to memory or to the user's file.
+	//
+	// writeUnderrun is raised ONLY for a byte abandoned by deselect. It is not
+	// a general error flag: reporting an underrun the ROM did not cause is a
+	// good way to make it retry forever.
+	reg        writeBusyReg;
+	reg [6:0]  writeByteTimer;
+	reg [7:0]  pendingWriteByte;
+	reg        writeUnderrunReg;
+	reg        decReady;
+
+	assign writeBusy     = writeBusyReg;
+	assign writeUnderrun = writeUnderrunReg;
+
+	// Any disk change resets the write path, so a half-decoded field cannot
+	// complete using the NEXT image's bytes and commit itself to the wrong
+	// disk (plan section 7, inherited defect 3). insertDisk is a level; both
+	// its edges matter -- it drops at img_mounted and rises at the loader's
+	// done. Reset to a constant 1: a non-constant async-reset value makes
+	// Quartus infer a latch.
+	reg insertDiskPrev;
+	always @(posedge clk or negedge _reset)
+		if (!_reset)   insertDiskPrev <= 1'b1;
+		else if (cep)  insertDiskPrev <= insertDisk;
+	wire insertDiskEdge = insertDisk && !insertDiskPrev;
+	wire insertDiskFall = !insertDisk && insertDiskPrev;
+
+	// ★ LC-SPECIFIC: the eject condition carries the (!ism_active || ism_sel)
+	// qualifier that the media-change work landed on 2026-08-06. Without it the
+	// ROM's register walks -- which run with Mode b7 clear -- look like ejects.
+	// Keep this in step with the real eject block further down.
+	wire ejectPulse = cep && _enable == 1'b0 && (!ism_active || ism_sel) &&
+	                  lstrbEdge == 1'b1 &&
+	                  driveWriteAddr == `DRIVE_REG_EJECT && ca2 == 1'b1;
+
+	wire writePathReset = ejectPulse || (cep && (insertDiskEdge || insertDiskFall));
+
+	always @(posedge clk or negedge _reset) begin
+		if (_reset == 1'b0) begin
+			writeBusyReg     <= 1'b0;
+			writeByteTimer   <= 7'd0;
+			pendingWriteByte <= 8'd0;
+			writeUnderrunReg <= 1'b0;
+			decReady         <= 1'b0;
+		end else if (writePathReset) begin
+			// abandon any in-flight write byte
+			writeBusyReg     <= 1'b0;
+			writeByteTimer   <= 7'd0;
+			decReady         <= 1'b0;
+		end else begin
+			decReady <= 1'b0; // default; pulsed for exactly one cep below
+
+			// byte pacing runs on the same clk8 cadence as diskDataByteTimer
+			if (cep && writeBusyReg) begin
+				if (_enable == 1'b1) begin
+					// drive deselected mid-byte: it never reached the media
+					writeBusyReg     <= 1'b0;
+					writeUnderrunReg <= 1'b1;
+				end else if (writeByteTimer == 7'd127) begin
+					writeBusyReg <= 1'b0;
+					decReady     <= 1'b1; // hand this byte to the decoder now
+				end else begin
+					writeByteTimer <= writeByteTimer + 1'b1;
+				end
+			end
+
+			// A byte is accepted when the IWM registers one for this drive. cen
+			// and cep never coincide, so this cannot race the pacing above.
+			// CSTIN as well as insertDisk: CSTIN is set by an OS eject and is
+			// NOT cleared by a remount, so it is the guest's view of "no disk".
+			if (writeReq && _enable == 1'b0 && !writeProtect && !writeBusyReg &&
+			    !driveRegs[`DRIVE_REG_CSTIN] && insertDisk) begin
+				pendingWriteByte <= writeData;
+				writeBusyReg     <= 1'b1;
+				writeByteTimer   <= 7'd0;
+				writeUnderrunReg <= 1'b0;
+			end
+		end
+	end
+
+	wire wrSecReject, wrSecAmark, wrSecFmtMark, wrSecFmtDs;
+	wire [3:0] wrSecAmarkSector;
+	wire [8:0] wrBufAddr = 9'd0;   // Phase 4's committer drives this
+	wire [7:0] wrBufData;
+
+	floppy_track_decoder dec
+	(
+		.clk          ( clk ),
+		.ready        ( decReady ),
+		.rst          ( !_reset || writePathReset ),
+
+		.side         ( driveSide ),
+		.sides        ( doubleSidedDisk ),
+		.track        ( driveTrack ),
+
+		.idata        ( pendingWriteByte ),
+
+		.sector_valid ( wrSecValid ),
+		.sector       ( wrSecNum ),
+		.addr         ( wrSecAddr ),
+		.reject       ( wrSecReject ),
+		.amark        ( wrSecAmark ),
+		.amark_sector ( wrSecAmarkSector ),
+		.fmt_mark     ( wrSecFmtMark ),
+		.fmt_ds       ( wrSecFmtDs ),
+
+		.buf_addr     ( wrBufAddr ),
+		.buf_data     ( wrBufData )
+	);
+
+	// ── Write-path cone anchor ──────────────────────────────────────────────
+	// Without this the Phase 3 fit contains NO decoder at all: nothing consumes
+	// wrSecValid/Num/Addr until Phase 4's committer, so synthesis sweeps the
+	// whole of floppy_track_decoder away and the fit tells us nothing about its
+	// timing or its cost. Worse, the decoder would then appear for the first
+	// time in the SAME fit as the committer and the SDRAM requester, and a
+	// timing failure there would have three candidate causes instead of one.
+	//
+	// This is also the floppy-cone marginality law from MacLC.sv's always-on
+	// anchor (2026-08-04): probes-off fits of this netlist have corrupted the
+	// floppy path on hardware while STA passed, and the fix was to keep the
+	// cone loaded in every build. Same law applies to the write cone. Never
+	// remove, ifdef, or XOR-fold these -- a reduction lets synthesis
+	// restructure the very cone the anchor exists to pin.
+	reg [7:0] wr_sec_cnt, wr_rej_cnt;
+	always @(posedge clk or negedge _reset) begin
+		if (!_reset) begin
+			wr_sec_cnt <= 8'd0;
+			wr_rej_cnt <= 8'd0;
+		end else begin
+			if (wrSecValid)    wr_sec_cnt <= wr_sec_cnt + 8'd1;
+			if (wrSecReject)   wr_rej_cnt <= wr_rej_cnt + 8'd1;
+		end
+	end
+
+	// Widths are spelled out per field so a later edit cannot silently truncate
+	// one: each word must total exactly 32.
+	(* preserve, noprune *) reg [31:0] wr_anchor0, wr_anchor1, wr_anchor2;
+	always @(posedge clk) begin
+		//  8 + 8 + 4 + 1+1+1+1 + 1 + 7 = 32
+		wr_anchor0 <= {wr_sec_cnt, wr_rej_cnt, wrSecNum,
+		               writeBusyReg, writeUnderrunReg, writeProtect, insertDisk,
+		               driveSide, driveTrack[6:0]};
+		//  2 + 1+1+1+1 + 4 + 22 = 32
+		wr_anchor1 <= {2'b0, wrSecValid, wrSecAmark, wrSecFmtMark, wrSecFmtDs,
+		               wrSecAmarkSector, wrSecAddr};
+		// pins the decoder's buffer READ cone, which nothing else loads until
+		// Phase 4's committer walks it.  24 + 8 = 32
+		wr_anchor2 <= {24'b0, wrBufData};
+	end
+
 	
 	// DRIVE_REG_DIRTN		0  /* R/W: step direction (0=toward track 79, 1=toward track 0) */
 	always @(posedge clk or negedge _reset) begin

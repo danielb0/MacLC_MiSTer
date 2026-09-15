@@ -444,6 +444,54 @@ silently and blames the wrong module.
 ### Phase 3 — IWM write path, volatile writes only
 *The "will the ROM cooperate" gate. Structurally cannot touch the user's file.*
 
+**Phase 3a — the handshake — CODE LANDED 2026-09-15, sim gate PASS.** Split out
+deliberately: §6.4 says a wrong handshake HANGS the machine, so the handshake
+gets its own hardware run with nothing able to reach memory or the file. Sim
+gate is `verilator/tb_floppy_write.v`, **55 checks** on Icarus — handshake
+shape (busy asserts on accept, clears after exactly 128 cep ticks, one
+`decReady` per byte), four silent refusals (write-protected / no disk / CSTIN
+set / drive deselected), deselect-mid-byte raising underrun, a media change
+abandoning an in-flight byte, and a **full-track round-trip**: all 12 sectors
+of track 0 written through the IWM data register and decoded back byte-exact
+at the right address.
+
+★ **With the OSD toggle Off — the default — hardware behaviour is identical to
+today.** `writeBusy` can never assert (no byte is ever accepted), so `_iwmBusy`
+and `_writeUnderrun` read 1 exactly as the old hardwired stubs did, and WRTPRT
+reads locked. That is what makes 3a safe to fit and boot.
+
+What is NOT in 3a: any commit path. `wrSecValid/Num/Addr` are produced and
+watched, and go nowhere.
+
+Three things worth carrying forward:
+- **`writeReq` is a LEVEL, not a pulse.** One CPU access spans several `cen`
+  ticks, and floppy.v's `!writeBusyReg` guard is what collapses that to one
+  byte. A pulse-shaped bench stimulus would pass while never reaching that
+  guard, so the bench holds the level on purpose. (Held longer than a whole
+  byte time it would hand over a second byte — unreachable here, since an
+  E-paced VPA access is ~1.23 us against a 15.75 us byte time. Recorded rather
+  than asserted against.)
+- **Placement in `floppy.v` is load-bearing.** The write block sits BELOW
+  `driveWriteAddr`/`lstrbEdge` because it reads them. Placed above, Verilog
+  implicitly declares `driveWriteAddr` as a 1-BIT net at the point of use and
+  silently truncates the 3-bit eject compare — an eject that never matches, and
+  so a write path never reset by one. This was caught by reading declaration
+  order, not by any tool.
+- **The decoder needs an anchor or it does not exist in the fit.** Nothing
+  consumes the tuple until Phase 4, so synthesis sweeps the whole decoder away;
+  it would then appear for the first time in the same fit as the committer and
+  the SDRAM requester, giving a timing failure three candidate causes instead
+  of one. `wr_anchor0/1/2` in `floppy.v` pin it, under the same never-fold law
+  as MacLC.sv's always-on anchor (§ the 2026-08-04 floppy-cone extension).
+
+**Gate (hardware) for 3a:** with the OSD toggle Off, boot and use the machine
+exactly as before — this is the regression half. Then toggle it On with a
+SCRATCH raw image mounted and have the guest attempt a write. The machine must
+not hang. Nothing should persist, in the image or the file.
+
+**Phase 3b — commit to SDRAM.** The committer, `wrBufAddr` driven for real, and
+the read-after-write the guest's verify depends on.
+
 - Real `writeReq`/strobe/byte from `swim.v` into `floppy.v`.
 - Real `_iwmBusy` (assert on CPU write to the data register, clear after one
   byte time) and an honest `_writeUnderrun`, replacing `rtl/swim.v:176`.

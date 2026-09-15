@@ -962,6 +962,10 @@ module emu
 		.insertDisk({1'b0, dsk_int_ins}),
 		.diskSides({1'b0, dsk_int_ds}),
 		.diskMFM({1'b0, dsk_int_mfm}),
+		// sim has no OSD: the floppy is always write-protected here, matching
+		// the core's power-on default. The write path is exercised by its own
+		// bench (tb_floppy_write.v), not through the full-system boot.
+		.writeProtect(2'b11),
 		.diskHD({1'b0, dsk_int_hd}),
 		.diskEject(diskEject),
 		.dskReadAddrInt(dskReadAddrInt),

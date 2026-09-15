@@ -81,6 +81,12 @@ module emu
 		"MACLC;UART57600:115200,MIDI;",
 		"-;",
 		"S6,DSKIMG,Mount Floppy;",
+		// Default OFF, and it must stay that way (plan section 6.4): the ROM's
+		// write primitive polls the IWM handshake in an UNBOUNDED loop, so the
+		// failure mode of a write bug here is a HUNG machine, not a failed write.
+		// Bit clear (0) = first entry = Off. Gated further in flp_int_wp below --
+		// a read-only mount or a DC42 stays write-protected whatever this says.
+		"OE,Floppy Write,Off,On;",
 		"-;",
 		"SC0,IMGVHDHDA,Mount SCSI-0;",
 		"SC1,IMGVHDHDA,Mount SCSI-1;",
@@ -2220,6 +2226,11 @@ module emu
 	// Forward declaration: the floppy fetch byte is assigned further down,
 	// after the SDRAM instantiation that produces sdram_out.
 	wire [15:0] extra_rom_data_demux;
+	// Declared here and ASSIGNED further down, where flp_int_ro/flp_int_raw
+	// exist: used before any declaration, SystemVerilog would implicitly
+	// create a 1-bit net here and the later `wire ... =` would collide.
+	wire flp_int_wp;
+
 	dataController_top dataController (
 		.clk32(clk_sys),
 		.clk8_en_p(clk8_en_p),
@@ -2304,6 +2315,7 @@ module emu
 		// reports an empty drive exactly as it did with nothing mounted —
 		// the state the Sony driver's benign -65 polling already covers.
 		.insertDisk({1'b0, dsk_int_ins}),
+		.writeProtect({1'b1, flp_int_wp}),   // drive 2 has no media: always locked
 		.diskSides({1'b0, dsk_int_ds}),
 		.diskMFM({1'b0, dsk_int_mfm}),
 		.diskHD({1'b0, dsk_int_hd}),
@@ -2508,7 +2520,16 @@ module emu
 		.is_dc42(flp_int_dc42), .dc42_fmt(flp_int_fmt)
 	);
 
-	// the floppy never writes in Phase 1
+	// Write-protect, three terms, any one of which locks the disk:
+	//   - the OSD Floppy Write toggle is Off (default, and the safe state),
+	//   - the slot was mounted read-only (latched at ITS OWN mount pulse), or
+	//   - the image is not RAW. A DC42's 84-byte header is not sector-aligned,
+	//     so writing one is structurally a two-block read-modify-write with a
+	//     partial-failure window (plan section 6.2). DC42 stays readable.
+	assign flp_int_wp = ~status[14] || flp_int_ro || !flp_int_raw;
+
+	// the floppy never writes to the SD card in Phase 3 -- see the plan: the
+	// handshake gets its own hardware run before anything can reach the file.
 	assign sd_wr[VD_FLOPPY_INT] = 1'b0;
 	assign sd_buff_din[VD_FLOPPY_INT] = 16'd0;
 
