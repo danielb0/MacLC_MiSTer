@@ -332,12 +332,23 @@ write behaviour introduced. A regression here is provably plumbing.
 the phantom second floppy.
 - ✅ **Boots from floppy** — raw 800K GCR, System 6.0.8 System Tools.
 - ✅ **Mounts** — 400K GCR, 800K GCR and 1.44MB MFM, DC42 *and* raw.
-- ⬜ **Eject and remount** (media change) — outstanding.
-- ⬜ **Boots from a DC42** — no LC-bootable DC42 existed to test with (every
-  one to hand is 1985-87 era, a non-bootable application disk, or truncated),
-  so `scripts/mk_dc42.py` mints one from the raw disk that is known to boot.
-  Same payload, byte-identical, so raw-vs-DC42 is an exact A/B and the only
-  variable is the 84-byte strip.
+- ⬜ **Eject and remount** (media change) — the last item. ★ Run it
+  **guest-eject-first**, and **not against the boot floppy**: per CLAUDE.md,
+  swapping under a live volume is hostile on a real Mac too (MAME 6.0.8 bombs
+  with "Disk Initialization package not present" when the boot floppy is
+  yanked), because drives only eject under software control and the OS has no
+  graceful path. An OSD swap with no guest eject would therefore produce a
+  FALSE failure. Boot from SCSI, then mount / guest-eject / mount-a-different
+  image. The regression being hunted is the ghost volume: mounts and lists but
+  every call fails with no driver error and zero disk I/O, which is what the
+  guest never being told the medium changed looks like.
+- ✅ **Boots from a DC42** — the `mk_dc42.py` fixture built from the same
+  System 6.0.8 disk. No LC-bootable DC42 existed to test with (every one to
+  hand is 1985-87 era, a non-bootable application disk, or truncated), so the
+  fixture is the raw disk that is known to boot, wrapped: byte-identical
+  payload, making raw-vs-DC42 an exact A/B whose only variable is the 84-byte
+  strip. Both booted. **The strip is correct end to end**, which is a stronger
+  result than a mount — a wrong offset would still mount and list.
 
 ★ Watch the **tag section** when making DC42 fixtures. A DC42 may legally carry
 `tagSize` 0, and an 800K image built that way has a payload of exactly 819200
