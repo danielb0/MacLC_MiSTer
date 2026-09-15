@@ -419,3 +419,18 @@ Discriminators (owner, cheap, in this order):
 
 `scripts/sample_loop.tcl` bug: `end_insystem_source_probe` does not take
 `-device_name` in 17.0 (samples are printed before the error; harmless).
+
+### Seed 5: one corrupted desktop icon (2026-09-15 ~23:00) — yellow flag
+
+On the FIRST boot after the hard reset from the Speedometer restart hang, one
+desktop colour icon drew corrupted (the owner's second sighting of this ever;
+the first, on an earlier build, crashed when the icon was moved). Chain read
+at the time: machine healthy and idle (CPU in the Finder loop, SCSI idle,
+last opcodes 0x28/0x2A, video alive) — a snapshot cannot show a past bad
+read. Moving the icon redrew it CORRECTLY, no crash ⇒ the on-disk data and
+the RAM handle were fine; the garbage was one bad draw. That is the July
+read-path signature, on a credited fit, but on a dirty-volume first boot
+with repair I/O in progress. Ruling: NOT a Phase B fail on its own. Seed 5
+must now pass a clean Finder soak (2 normal boots, colour-icon folders
+opened, Quark typing, restart); any further mis-drawn icon on a normal boot
+= FAIL, cap back, chain read immediately.
