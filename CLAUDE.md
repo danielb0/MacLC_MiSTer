@@ -147,6 +147,16 @@ Standard MiSTer framework files (video scaling, HPS I/O, audio output). Generall
 - `scratch/` - **(gitignored) ALL session scratch goes here**: screenshots,
   build/launch logs, probe RBFs, captures, analysis dumps. Never leave scratch
   work in the repo root and never commit it.
+  **Retention rule (2026-09-15):** when an experiment's result is written up,
+  it keeps its reports and `RESULT*.md`, and only those RBFs that were
+  hardware-gated or are cited by a doc or memory - normally one. Every other
+  RBF from the experiment (STA-rejected seeds, superseded variants, probe
+  fits) is deleted then, not later. Never archive a build tree
+  (`db/`, `incremental_db/`, `output_files/`) under `scratch/`; release RBFs
+  are in git history (`git show <commit>:releases/<file>`), so never keep
+  copies of those either. Loose probe dumps in the scratch root go when the
+  experiment closes. (Context: 32 RBFs / 520 MB accumulated over one week of
+  timing work, most from experiments already refuted.)
 
 ## CPU Conversion Notes
 
