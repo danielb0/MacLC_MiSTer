@@ -370,7 +370,7 @@ gets its own hardware boot regardless). Three sequential full builds.
 |---|---|---|---|---|---|
 | 4 | met, worst +0.254 ns (hold, CPU PLL clock) | 0 | 30.481 ns / +28.430 (regfile PORT_B_WRITE_ENABLE_REG → regfile_rtl_1_bypass[6]) | 43ea5373 | **PASS** — reboot with CD inserted, Quark typing, benchmarks in the usual ballpark (owner) |
 | 5 | met, worst +0.179 ns (hold, HDMI PLL clock) | 0 | 29.741 ns / +29.517 (same regfile cone, → regfile_rtl_1_bypass[2]) | 94c6d3f0 | **PASS** — after the one post-hang icon event (below): 2 clean normal boots, all icons fine, Quark stable, shutdown + reboot clean (owner, ~23:15) |
-| 7 | met, worst +0.247 ns (hold, video PLL clock) | 0 | **32.101 ns** / +29.115 (same regfile cone, → regfile_rtl_1_bypass[6]) — would have FAILED the 32 ns cap by 0.1 ns | b8067040 | pending |
+| 7 | met, worst +0.247 ns (hold, video PLL clock) | 0 | **32.101 ns** / +29.115 (same regfile cone, → regfile_rtl_1_bypass[6]) — would have FAILED the 32 ns cap by 0.1 ns | b8067040 | **PASS** — stable, Quark fine, reboot OK (owner, ~23:30; benchmark deliberately not run) |
 
 **The spread, measured:** kernel worst path 30.5 / 29.7 / 32.1 ns across seeds 4 / 5 / 7 — a 2.4 ns placement spread that against the 32 ns cap is pass-or-fail by luck (seed 7 would have been rejected) and against the genuine 61.5 ns budget leaves ≥29 ns everywhere. That is the seed roulette, quantified, and what the credit removes — provided the hardware agrees.
 
@@ -440,3 +440,22 @@ normal reboot with every icon fine. The earlier sighting (a different, older
 build) ended in a dramatic crash when the icon was moved — memory already
 corrupt, i.e. the class the Speedometer heap-hang belongs to, not this one.
 Seed 5 soak: PASSED — second boot clean, Quark stable, shutdown + reboot clean.
+
+### Phase B verdict — PASS, 3/3 (2026-09-15 ~23:30)
+
+The September hypothesis is confirmed: the two-period credit was unsafe only
+because the loop hid delay from STA. With the loop gone, three seeds — including
+seed 7, whose kernel came in at 32.1 ns and would have been rejected by the cap —
+are all stable on hardware under the credit. The credit is committed in
+`MacLC.sdc`; the cap stays as a commented one-line revert. Seed roulette on the
+kernel is over: the 2.4 ns placement spread now sits inside a 29 ns margin.
+
+Caveats carried forward: (1) all three Phase B fits carried the observer deck;
+the PR/release fit is probes-off and gets its own hardware gate (pr_guidelines
+§2) — that is the next step. (2) The restart-after-Speedometer heap hang is
+pre-existing and tracked separately. (3) One post-hard-reset icon draw on seed 5
+is logged above; it did not recur across the soak.
+
+**Next:** PR branch off `upstream/master` with the kernel VHDL/`.v`,
+`verilator/tb_mul_modes.v`, and `MacLC.sdc`; probes-off SEED 4 fit of exactly
+that design; hardware gate; RBF into `releases/`; PR.

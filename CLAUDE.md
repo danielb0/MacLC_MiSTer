@@ -199,7 +199,12 @@ Standard MiSTer framework files (video scaling, HPS I/O, audio output). Generall
   else), `verilator/tb_mul_modes.v` old-vs-new bus-log diff (build cmd in its
   header), and the 400-frame boot CPU-trace diff. `report_loops` is not a
   TimeQuest command in 17.0; the loop node list, when one exists, is printed
-  under Warning 332125 in the STA report.
+  under Warning 332125 in the STA report. **Phase B (same day): the kernel's
+  genuine two-period SDC credit is RESTORED** (`set_multicycle_path -setup
+  -end 2` kernel-internal), passed 3/3 on hardware at seeds 4/5/7 — the seed
+  roulette is over (kernel worst 29.7–32.1 ns vs 61.5 ns). The 32 ns cap line
+  stays commented in `MacLC.sdc` as the one-line revert. Do not re-cap
+  "because the kernel is tight": it is not, any more.
 
 ## File Locations
 
