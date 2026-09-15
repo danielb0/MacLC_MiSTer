@@ -187,6 +187,55 @@ to the original — never on `master` here.
 
 ---
 
+## 3b. The PR branch
+
+Adopted from MacPlus, where the dev branches (`floppy-write`, `scsi-upgrade`,
+`mac128k`, `cd-*`) were never what got PR'd — `upstream-pr` and `upstream-pr-2`
+were. **Work on a dev branch; PR from a branch built for the purpose.**
+
+What the PR branch does:
+- **Only the relevant files.** For us that means the RTL, the testbenches the PR
+  body cites (a reviewer must be able to re-run the counts), the scripts needed
+  to use or verify the feature, and the `releases/` RBF. It does NOT mean
+  `CLAUDE.md`, `docs/pr_guidelines.md`, or `docs/floppy_write_plan.md` — the
+  first two are fork-local policy (§2) and the third carries our internal
+  staging, which §1 says not to describe outside this repo.
+- **Probe decks off.** `USE_DBG_*` commented in `MacLC.qsf`. They already are;
+  the point is to check rather than assume, because flipping them is
+  working-tree-only and easy to leave behind.
+- ~~Comments stripped.~~ **NOT here** — see §3a. MacPlus stripped them because
+  the code was entering Sorgelig's repo with its own established hand. This core
+  is danifunker's and he works with Claude Code too, so the comments stay.
+
+### Code-synchronised, and that is CHECKABLE
+
+MacPlus kept the PR branch code-synchronised with dev and *proved* it: commit
+`2abe000` states "all seventeen files decomment identically to e9d0c8f" — strip
+the comments from both sides, diff, require empty. That is what made a
+comment-only commit demonstrably comment-only.
+
+**Because we are not stripping comments, our version of that check is stronger
+and trivial to run:**
+
+```bash
+git diff <dev-branch> <pr-branch> -- rtl/ MacLC.sv MacLC.qsf MacLC.sdc files.qip
+```
+
+**It must be EMPTY.** Not "reviewed and looks equivalent" — empty.
+
+★ **Why this matters more than tidiness: it is what makes the hardware gate
+transfer.** We gate an RBF built from a dev-branch commit. If the design files
+are byte-identical on the PR branch, that gate is evidence for what we are
+actually proposing to merge. If they differ by so much as a line, the PR ships a
+design nobody has ever run, and the testing paragraph in the PR body becomes a
+claim about a different binary.
+
+Run it again after every rebase or cherry-pick, not once at the start. "Always
+kept code-synchronised" is a continuous property; the moment dev moves, the PR
+branch is stale and its gate no longer applies.
+
+---
+
 ## 4. What not to write
 
 - Anything the testing does not support. "Should work", "in theory", "probably
