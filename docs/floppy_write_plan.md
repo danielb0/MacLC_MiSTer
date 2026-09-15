@@ -484,13 +484,48 @@ Three things worth carrying forward:
   of one. `wr_anchor0/1/2` in `floppy.v` pin it, under the same never-fold law
   as MacLC.sv's always-on anchor (§ the 2026-08-04 floppy-cone extension).
 
-**Gate (hardware) for 3a:** with the OSD toggle Off, boot and use the machine
-exactly as before — this is the regression half. Then toggle it On with a
-SCRATCH raw image mounted and have the guest attempt a write. The machine must
-not hang. Nothing should persist, in the image or the file.
+**Gate (hardware) for 3a — PASS, 2026-09-15.** Fit `MacLC_5608e02a_phase3a.rbf`
+(md5 `31f777b0`). No hang, no crash. With the toggle On and a scratch raw image,
+a Finder copy ran to completion and then failed with *"the file couldn't be
+verified, because a disk error occurred"*; the file did not land.
+
+★ **The failure was at the VERIFY stage, not the WRITE stage, and that is where
+the information is.** Three separate things are confirmed by which error
+appeared:
+- **WRTPRT unhardwiring works.** A still-locked disk makes the Finder refuse up
+  front ("the disk is locked") and never start copying.
+- **The handshake works and raises no spurious underruns.** A misbehaving
+  `_writeUnderrun` surfaces as a write error mid-copy, not a verify failure at
+  the end. The ROM's UNBOUNDED poll loop (§2.1) completed every time — that was
+  the hang risk this phase existed to retire.
+- **Nothing was committed, as designed.** The verify reads SDRAM, which still
+  holds the pre-write contents, so it mismatches.
+
+★ **Consequence for Phase 3b's gate: the guest's own verify is a built-in
+oracle.** A Finder copy completes only if every sector decoded byte-exactly —
+sector number, address and all 512 payload bytes. So "the copy succeeds" is a
+far stronger check than it appears, and no HUD or JTAG fit is needed to read the
+decoder's counters. A wrong decode fails in exactly the way just observed.
+
+(The owner expected the file to appear and then vanish on unmount. That is the
+**Phase 3b** behaviour — it needs the SDRAM commit for the verify read to find
+anything.)
 
 **Phase 3b — commit to SDRAM.** The committer, `wrBufAddr` driven for real, and
-the read-after-write the guest's verify depends on.
+the read-after-write the guest's verify depends on. Also lands, now that 3a is
+gated:
+- **Drop the `!flp_int_raw` term** from `flp_int_wp` (§6.2) — DC42 is writable
+  by the owner's ruling, and phases 3a/3b need nothing else for it because
+  SDRAM holds normalised sector data whatever the container was.
+- **A parameter on `floppy.v` so `floppyExt` elaborates WITHOUT the write
+  path.** The Phase 3a fit revealed the cost: `floppy_track_decoder` is
+  instantiated unconditionally, so the external drive — which never has media
+  and has `writeProtect` tied high — carries a decoder it can never use.
+  Quartus reported it as Warning 18550, "implemented as ROM because the write
+  logic is always disabled", which also independently confirms the tie-off
+  works. It wastes roughly 1 M10K at 92% M10K utilisation. Unlike removing the
+  `floppyExt` instance itself (which `410a064` deliberately kept), this changes
+  nothing drive-visible.
 
 - Real `writeReq`/strobe/byte from `swim.v` into `floppy.v`.
 - Real `_iwmBusy` (assert on CPU write to the data register, clear after one
