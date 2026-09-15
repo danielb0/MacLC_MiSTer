@@ -1,16 +1,23 @@
-# Name the combinational loop(s) Quartus is estimating through.
+# Name the combinational loop(s) TimeQuest is estimating through.
 #
-# WHY: MacLC.sdc's kernel-cap note attributes the loop to setexecOPC feeding the
-# setstate mux trees in TG68KdotC_Kernel.vhd. Reading the RTL does not support
-# that: across all 15 `IF setexecOPC` guards in the big decode process the ONLY
-# signals assigned are datatype / dest_2ndHbits / dest_areg / dest_hbits /
-# source_2ndHbits / source_areg / source_lowbits, and none of them feed
-# setexecOPC's own inputs (setstate, next_micro_state, set_direct_data,
-# exec_write_back, state, addrvalue). The node counts disagree too — the note
-# says 150, the 2026-09-15 build says 132.
+# HISTORY. Written 2026-09-15 when MacLC.sdc's kernel-cap note attributed the
+# TG68 loop to "setexecOPC feeding the setstate mux trees" and a read of the RTL
+# did not support that. The first version called `report_loops`, which is NOT a
+# TimeQuest command in Quartus 17.0 ("invalid command name"). It was never
+# needed anyway: TimeQuest prints every loop it finds while building the timing
+# netlist, as Warning 332125 ("Found combinational loop of N nodes File: ...
+# Line: ...") followed by one Warning 332126 line per node — and those lines are
+# already in output_files/MacLC.sta.rpt (and .fit.rpt) after every compile.
 #
-# So before cutting anything in a working CPU core, get the loop from the tool
-# that is complaining about it rather than from a description of it.
+# The 2026-09-15 loop (132 nodes) was named from exactly that list: setexecOPC
+# -> datatype (MULU/MULS override) -> EA-build (An) test -> setstate ->
+# setexecOPC. It is gone as of branch tg68-break-comb-loop; see
+# docs/tg68_comb_loop_plan.md.
+#
+# WHAT THIS SCRIPT DOES NOW. Rebuilds the timing netlist and lets TimeQuest
+# print the loop warnings, then says what to grep for. Use it on a project
+# whose last compile you do not have the reports of; otherwise just:
+#   grep -n "332125\|332126" output_files/MacLC.sta.rpt
 #
 # Usage (project must NOT be mid-compile — quartus_sta takes the project DB):
 #   "$QUARTUS_BIN/quartus_sta" -t scripts/report_loops.tcl
@@ -19,10 +26,6 @@ create_timing_netlist -model slow
 read_sdc
 update_timing_netlist
 puts "===== COMBINATIONAL LOOPS ====="
-if {[catch {report_loops -detail full_path -stdout} err]} {
-	puts "report_loops failed: $err"
-	puts "falling back to summary detail"
-	catch {report_loops -stdout} err2
-	puts $err2
-}
+puts "Any loop is listed ABOVE as Warning (332125) with one Warning (332126) line per node."
+puts "No 332125 above means TimeQuest found no combinational loop in this netlist."
 project_close

@@ -186,6 +186,20 @@ Standard MiSTer framework files (video scaling, HPS I/O, audio output). Generall
   and the CONF_STR has no speed row. The 8.125 MHz `clk8_en_p/n` off the same
   divider is the **peripheral** bus enable, not an alternate CPU speed — that
   is most likely where the old "8 MHz or 16 MHz" line came from.
+- **TG68 kernel combinational loop: GONE as of 2026-09-15** (branch
+  `tg68-break-comb-loop`; full write-up `docs/tg68_comb_loop_plan.md`). It was
+  `setexecOPC -> datatype` (the MULU/MULS execute-phase "long" override, the
+  only `setexecOPC`-guarded `datatype` write) `-> EA-build (An) test ->
+  setstate -> setexecOPC`, introduced by the 2026-06-02 cmp.l (An) fix
+  (42ae7a6, danifunker) — not inherited from TG68K. The override now targets
+  `set_datatype`. **LAW: never assign `datatype` under a `setexecOPC` guard in
+  the decode process.** Gates for any kernel edit: no 332081/332125 in
+  `MacLC.fit.rpt`/`.sta.rpt` (the map report's "logic cells representing
+  combinational loops" is NOT a gate — it went 17 -> 16, it counts something
+  else), `verilator/tb_mul_modes.v` old-vs-new bus-log diff (build cmd in its
+  header), and the 400-frame boot CPU-trace diff. `report_loops` is not a
+  TimeQuest command in 17.0; the loop node list, when one exists, is printed
+  under Warning 332125 in the STA report.
 
 ## File Locations
 

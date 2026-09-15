@@ -47,6 +47,26 @@
 # break the structural loop in the kernel so STA is exact; until then this cap
 # is the guard. Scope is kernel-INTERNAL only, as before: the tg68k wrapper FSM
 # and every CPU<->SDRAM/peripheral path are ordinary single-cycle paths.
+#
+# ★ 2026-09-15 — THE LOOP IS GONE (branch tg68-break-comb-loop). The mechanism
+# described above was wrong: the only real edge was setexecOPC -> datatype (the
+# MULU/MULS execute-phase "long" override, the sole setexecOPC-guarded datatype
+# write in the decode process) -> the EA-build test
+# `opcode(5 downto 3)="010" AND datatype="10"` (42ae7a6, the cmp.l (An) fix,
+# 2026-06-02 — so the loop was three months old and not TG68K's) -> setstate /
+# next_micro_state -> setexecOPC. Moving that one override to set_datatype
+# (identical value at every consumer; see the comment at the MUL site in
+# TG68KdotC_Kernel.vhd) removes the edge and adds none. Evidence, same SEED 4
+# that failed this cap at -1.024 ns with the loop: no 332081/332125 anywhere,
+# kernel-internal worst path 24.8 ns data delay (+6.86 ns against the cap), and
+# the warning-count diff against that parent fit is exactly the loop's 135
+# messages plus its "timing not met". Functional gates: verilator/tb_mul_modes.v
+# (old vs new kernel bus logs identical, every addressing mode) and the boot
+# CPU-trace diff. STA is now EXACT for the kernel, so the "loop-hidden
+# remainder" argument above no longer applies. THE CAP STAYS for now as a
+# policy choice (docs/tg68_comb_loop_plan.md, Phase A). Whether to give the
+# genuine two-period budget back is Phase B: decided on hardware across seeds
+# 4/5/7, never on STA alone (seed-8 precedent).
 set_max_delay -from [get_keepers {*TG68KdotC_Kernel*}] -to [get_keepers {*TG68KdotC_Kernel*}] 32.0
 
 # ----------------------------------------------------------------------------
