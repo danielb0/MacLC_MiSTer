@@ -376,3 +376,37 @@ Note on seed 4: with the credit the fitter let the kernel relax from 24.8 ns
 (Phase A, under the cap) back to 30.5 ns, exactly the "32-38 ns as STA sees
 them" behaviour the SDC history describes — the difference is that every one of
 those paths is now measured, not estimated, and 30.5 ns is half the real budget.
+
+### Restart-after-Speedometer hang — probed 2026-09-15 22:37 (seed 5, deck ON)
+
+Second occurrence (first: Phase A probes-off fit). Both after a Speedometer
+4.02 run; restarts WITHOUT a benchmark first have been clean every time.
+Frozen desktop, mouse alive. Read off the chain (`scratch/tg68loop/`
+`probes_hang*.txt`, `loop_samples.txt`, `padr_samples.txt`):
+- CPU alive and fetching (PACT advancing), FC=6, no interrupt pending, video
+  alive (VBL count moving). SCSI: both targets IDLE, last opcode 0x28 on both,
+  DMA engine idle. **Not a CPU freeze, not a SCSI hang.**
+- Tight ROM loop $A0E674-$A0E686 = the Memory Manager's free-block
+  coalescing walk inside a heap zone (a6 = zone; `lea $34(a6),a3` = first
+  block; `andl $031A` = Lo3Bytes; inner loop `add.l (a3),d0 / adda.l (a3),a3 /
+  tst.b (a3) / beq`). Runs from the shutdown-time memory work.
+- Data addresses cycle $5F8B3C → (+$30) $5F8B6C → (+$170BE4, a 1.5 MB free
+  block) $769750 → header reads ≈ $00E8F3EC, a "free" 15 MB block that wraps
+  the 24-bit space back to $5F8B3C. **A heap block header / zone trailer at
+  ~$769750 has been overwritten.** The VIA1/pseudo-VIA reads in the samples
+  are the VBL/ADB handlers (the mouse moves).
+- Both fits (capped + probes-off, credited + probes-on) show it, so it is
+  **independent of Phase B's credit** and not evidence for or against it.
+  Whether it predates the loop fix is UNKNOWN: the PR #5 A/B ran four
+  Speedometer passes but no restart afterwards is recorded.
+
+Discriminators (owner, cheap, in this order):
+1. Previous release RBF (`releases/MacLC_2c6c67cd.rbf`, the PR #5 gated
+   build) — full Speedometer, then Restart. Hang ⇒ pre-existing.
+2. Loop-fix RBF — Speedometer **CPU test only**, Restart; then **Disk test
+   only**, Restart. Names the poisoning test (Disk = SCSI pseudo-DMA into RAM
+   is the prime suspect for a header overwrite; CPU/Math = pure execution).
+3. Note the RAM size setting; $769750 is near the top of an 8 MB machine.
+
+`scripts/sample_loop.tcl` bug: `end_insystem_source_probe` does not take
+`-device_name` in 17.0 (samples are printed before the error; harmless).
