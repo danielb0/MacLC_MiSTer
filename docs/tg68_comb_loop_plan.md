@@ -331,10 +331,14 @@ RBF `scratch/tg68loop/MacLC_fix_seed4.rbf` on the DE10-Nano:
   Baseline 20260827 / PR #5: CPU 0.203 / 0.203, Graphics 0.202 / 0.207, Math
   0.662 / 0.662, Disk 0.480 / n.r., PR 0.248 / 0.250. **CPU and Math — the
   kernel-sensitive figures — are identical**, the hardware-side equivalence
-  witness. Disk −9%: run with a CD mounted; the memory records a mounted
-  floppy costing ~13% on both builds, so mount state is the first
-  explanation — re-run with only the boot disk mounted before reading it as
-  a core change. (Earlier text in this doc said "Speedometer 3.23"; the A/B
+  witness. **Disk −9.6% (0.434 vs 0.480) — OPEN.** No floppy was mounted
+  (owner confirmed), so the known ~13% floppy penalty is not it. A CD WAS
+  mounted (the earlier A/B's CD state is not recorded; the HPS CD layer adds
+  Main-side load, and Main serves every SCSI block). Earlier baselines ranged
+  0.468–0.480, so ~2.5% is noise; 9.6% is not. The core is the least likely
+  cause: the kernel is cycle-identical (trace diff) and cycle counts do not
+  move with placement. Discriminator, not yet run: eject the CD, re-run Disk;
+  if still ~0.434, run the previous RBF the same evening on the same SD state. (Earlier text in this doc said "Speedometer 3.23"; the A/B
   tool is 4.02.)
 - **Restart:** the first Special ▸ Restart with a CD mounted hung at a frozen
   desktop with a live mouse (a driver call never returning, not a CPU
