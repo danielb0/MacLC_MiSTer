@@ -72,6 +72,18 @@ Full process + gotchas: **`docs/mame_compare.md`** (memory tap, maincpu trace,
 PC-stream divergence diff; macOS has no `timeout`, debugger defaults to the Egret
 HC05 not the 68020, MAME PCs are 8-digit `00Axxxxx`, etc.).
 
+## PRs and releases — WE are the reviewers
+
+**Treat "merged" as "shipped".** danifunker can cut releases that feed
+update_all, so merged dev code reaches end users with no further gate. This is
+NOT the MacPlus/Sorgelig model (an external reviewer is the bar); it is the
+UK101 model, where the repo owner publishes directly.
+
+House style, the reviewer's pre-merge checklist, and the consequences (no
+half-finished OSD rows; staged plans are a MERGE discipline, not just a release
+one; `USE_DBG_*` macros commented) live in **[docs/pr_guidelines.md](docs/pr_guidelines.md)**.
+Read it before opening or merging a PR.
+
 ## Framework Files Are OFF-LIMITS (`sys/`)
 
 **NEVER modify files under `sys/` (the MiSTer framework: sys_top.v, ascal.vhd,
