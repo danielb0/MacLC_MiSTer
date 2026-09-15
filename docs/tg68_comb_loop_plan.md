@@ -401,8 +401,8 @@ Frozen desktop, mouse alive. Read off the chain (`scratch/tg68loop/`
   Speedometer passes but no restart afterwards is recorded.
 
 Discriminators (owner, cheap, in this order):
-1. Previous release RBF (`releases/MacLC_2c6c67cd.rbf`, the PR #5 gated
-   build) — full Speedometer, then Restart. Hang ⇒ pre-existing.
+1. Previous release RBF (`scratch/tg68loop/control/MacLC_2c6c67cd_PR5_gated.rbf`,
+   extracted from `3eb51fb`, the PR #5 gated build, pre-loop-fix) — full Speedometer, then Restart. Hang ⇒ pre-existing.
 2. Loop-fix RBF — Speedometer **CPU test only**, Restart; then **Disk test
    only**, Restart. Names the poisoning test (Disk = SCSI pseudo-DMA into RAM
    is the prime suspect for a header overwrite; CPU/Math = pure execution).
