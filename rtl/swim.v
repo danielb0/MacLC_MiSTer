@@ -81,6 +81,11 @@ module swim
 	output        wrSdReq,
 	input         wrSdAck,
 	output        wrCommitDone,
+	output [21:0] wrCommitAddr,
+	// Persistence tap, internal drive only — see floppy.v's ports.
+	output  [7:0] wrSdBufAddr,
+	output [15:0] wrSdBufData,
+	output        wrSdBufWr,
 	input [1:0] writeProtect, // 1 = this drive refuses writes: the OSD write
 	                        // enable is off, the slot mounted read-only, or it
 	                        // mounted a DC42 (plan section 6.2 -- a DC42 write
@@ -329,6 +334,10 @@ module swim
 		.wrSdReq(wrSdReq),
 		.wrSdAck(wrSdAck),
 		.wrCommitDone(wrCommitDone),
+		.wrCommitAddr(wrCommitAddr),
+		.wrSdBufAddr(wrSdBufAddr),
+		.wrSdBufData(wrSdBufData),
+		.wrSdBufWr(wrSdBufWr),
 		.readData(readDataInt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyInt),
@@ -400,6 +409,10 @@ module swim
 		.wrSdReq(),
 		.wrSdAck(1'b0),
 		.wrCommitDone(),
+		.wrCommitAddr(),
+		.wrSdBufAddr(),
+		.wrSdBufData(),
+		.wrSdBufWr(),
 		.readData(readDataExt),
 		.advanceDriveHead(advanceDriveHead),
 		.newByteReady(newByteReadyExt),

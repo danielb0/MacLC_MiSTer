@@ -971,6 +971,10 @@ module emu
 		// anyway. Its own bench (tb_floppy_commit.v) drives it properly.
 		.wrSdAddr(), .wrSdData(), .wrSdReq(), .wrSdAck(1'b0),
 		.wrCommitDone(),
+		// Phase 4's persistence tap likewise has no consumer here: sim.v has no
+		// hps_io block device behind the floppy slot, so there is no .dsk to
+		// write back to. floppy_sd_writer.v is exercised by its own bench.
+		.wrCommitAddr(), .wrSdBufAddr(), .wrSdBufData(), .wrSdBufWr(),
 		.diskHD({1'b0, dsk_int_hd}),
 		.diskEject(diskEject),
 		.dskReadAddrInt(dskReadAddrInt),

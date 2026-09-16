@@ -119,6 +119,15 @@ module floppy
 	output        wrSdReq,
 	input         wrSdAck,
 	output        wrCommitDone,   // 1-clk pulse: a sector reached SDRAM
+	output [21:0] wrCommitAddr,   // image BYTE offset of that sector's byte 0
+	// Persistence tap for rtl/floppy_sd_writer.v (Phase 4) — a mirror of the
+	// word stream the committer is writing to SDRAM, so the SD writer can
+	// shadow the sector and push it out to the user's .dsk. Pure pass-through
+	// of floppy_write_committer.v's sd_buf_* outputs; see its header for why
+	// the tap is taken from the registered SDRAM word rather than re-read.
+	output  [7:0] wrSdBufAddr,
+	output [15:0] wrSdBufData,
+	output        wrSdBufWr,
 	
 	input advanceDriveHead,  // prevents overrun when debugging, does not exist on a real Mac!
 	output reg newByteReady,
@@ -914,7 +923,6 @@ module floppy
 	// correction above the write path: a forward reference to a net declared
 	// later in the same module resolves correctly.
 	wire        wrCommitBusy;
-	wire [21:0] wrCommitAddr;
 
 	// ── Commit a verified sector to the SDRAM image (Phase 3b) ──────────────
 	// Volatile ONLY: this reaches SDRAM, never the SD card. The guest's own
@@ -938,7 +946,11 @@ module floppy
 
 		.busy           ( wrCommitBusy ),
 		.done           ( wrCommitDone ),
-		.committed_addr ( wrCommitAddr )
+		.committed_addr ( wrCommitAddr ),
+
+		.sd_buf_addr    ( wrSdBufAddr ),
+		.sd_buf_data    ( wrSdBufData ),
+		.sd_buf_wr      ( wrSdBufWr )
 	);
 
 	// ── Write-path cone anchor ──────────────────────────────────────────────
@@ -996,6 +1008,10 @@ module floppy
 		assign wrSdData      = 16'd0;
 		assign wrSdReq       = 1'b0;
 		assign wrCommitDone  = 1'b0;
+		assign wrCommitAddr  = 22'd0;
+		assign wrSdBufAddr   = 8'd0;
+		assign wrSdBufData   = 16'd0;
+		assign wrSdBufWr     = 1'b0;
 	end
 	endgenerate
 

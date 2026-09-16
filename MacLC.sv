@@ -2234,6 +2234,12 @@ module emu
 	wire [15:0] wc_data;
 	wire        wc_req, wc_done;
 	wire        wc_ack;
+	// Persistence tap (Phase 4): the committer's mirror of the same word
+	// stream, shadowed by floppy_sd_writer below and pushed out to the .dsk.
+	wire [21:0] wc_commit_addr;
+	wire  [7:0] wc_buf_addr;
+	wire [15:0] wc_buf_data;
+	wire        wc_buf_wr;
 
 	dataController_top dataController (
 		.clk32(clk_sys),
@@ -2323,6 +2329,8 @@ module emu
 		.wrSdAddr(wc_addr), .wrSdData(wc_data),
 		.wrSdReq(wc_req),   .wrSdAck(wc_ack),
 		.wrCommitDone(wc_done),
+		.wrCommitAddr(wc_commit_addr),
+		.wrSdBufAddr(wc_buf_addr), .wrSdBufData(wc_buf_data), .wrSdBufWr(wc_buf_wr),
 		.diskSides({1'b0, dsk_int_ds}),
 		.diskMFM({1'b0, dsk_int_mfm}),
 		.diskHD({1'b0, dsk_int_hd}),
@@ -2505,6 +2513,27 @@ module emu
 	wire        flp_int_loading, flp_int_done, flp_int_dc42, flp_int_raw, flp_int_ro;
 	wire [63:0] flp_int_size;
 	wire  [7:0] flp_int_fmt;
+	// The read (floppy_loader) and write (floppy_sd_writer) halves of this slot
+	// each drive their own sd_lba; one mux below picks between them, because a
+	// shared slot port with two drivers is Quartus Error 10028 (and Verilator
+	// would not have said a word). Same shape as MacPlus.sv:805.
+	wire [31:0] flp_ldr_lba, flp_sdw_lba;
+	wire        flp_ldr_rd,  flp_sdw_rd;
+	// The guest's eject, as a single pulse. This is what triggers the DC42
+	// header's checksum rewrite, and the guest eject is the only moment it can
+	// happen: the file is still mounted in hps_io, so the slot still reaches
+	// it. An OSD unmount has already taken the file away.
+	reg  flp_eject_d;
+	wire flp_eject_pulse = diskEject[0] && !flp_eject_d;
+	always @(posedge clk_sys) flp_eject_d <= diskEject[0];
+	// COMPLETE 512-byte blocks in the FILE. flp_int_size is the PAYLOAD size
+	// (the loader already subtracted DC42's 84-byte header), so the header
+	// goes back on to get the file's own length. The floor is deliberate: a
+	// DC42 file never ends on a block boundary and hps_io can only write whole
+	// blocks, so the final partial block is not writable - see LC addition 3
+	// in rtl/floppy_sd_writer.v.
+	wire [63:0] flp_file_bytes  = flp_int_size + (flp_int_dc42 ? 64'd84 : 64'd0);
+	wire [12:0] flp_file_blocks = flp_file_bytes[21:9];
 	wire [23:0] flp_int_wr_addr;
 	wire [15:0] flp_int_wr_data;
 	wire        flp_int_wr_req;
@@ -2516,7 +2545,7 @@ module emu
 		.img_mounted (img_mounted[VD_FLOPPY_INT]),
 		.img_size    (img_size),
 		.img_readonly(img_readonly),
-		.sd_lba(sd_lba[VD_FLOPPY_INT]), .sd_rd(sd_rd[VD_FLOPPY_INT]),
+		.sd_lba(flp_ldr_lba), .sd_rd(flp_ldr_rd),
 		.sd_ack(sd_ack[VD_FLOPPY_INT]),
 		.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout), .sd_buff_wr(sd_buff_wr),
 		.base_addr(24'h600000),
@@ -2537,10 +2566,66 @@ module emu
 	// plumbed for exactly that.
 	assign flp_int_wp = ~status[14] || flp_int_ro;
 
-	// the floppy never writes to the SD card in Phase 3 -- see the plan: the
-	// handshake gets its own hardware run before anything can reach the file.
-	assign sd_wr[VD_FLOPPY_INT] = 1'b0;
-	assign sd_buff_din[VD_FLOPPY_INT] = 16'd0;
+	// ── Phase 4: committed sectors reach the user's file ───────────────────
+	// Everything upstream of here is volatile: the committer lands a verified
+	// sector in the SDRAM image and the guest's read-after-write verify is
+	// satisfied, but a remount re-downloads the file over it
+	// (floppy_loader.v:6 loads into the SAME SDRAM region), so the write is
+	// gone. This module is what makes it durable.
+	//
+	// write_ok is the single gate, and it is deliberately narrower than
+	// flp_int_wp:
+	//   ~flp_int_wp   — the OSD Floppy Write toggle is On and the slot did not
+	//                   mount read-only. Same condition that unlocks WRTPRT,
+	//                   so the guest is never told a disk is writable when the
+	//                   card is not going to take the write.
+	//   flp_int_raw   — RAW IMAGES ONLY for now. A DC42 file puts sector N at
+	//                   84 + N*512, so a sector write is a fixed 428/84 split
+	//                   across two blocks and the header's payload checksums
+	//                   cannot be updated incrementally (plan section 6.2
+	//                   items 3-5, decision still OPEN). Until that is
+	//                   settled, DC42 mounts keep exactly the Phase 3b
+	//                   behaviour: the guest's writes work and live in SDRAM
+	//                   for as long as the disk stays mounted.
+	// size_blocks comes from the loader's own payload size, so it is the
+	// NORMALISED length (DC42's 84-byte header already stripped) and the
+	// writer's end-of-image refusal keys off the same number the read path
+	// uses.
+	wire        flp_int_sdw_busy;
+	floppy_sd_writer floppy_sd_writer_int
+	(
+		.clk             ( clk_sys ),
+		.reset           ( !pll_locked_s ),
+		.img_mounted     ( img_mounted[VD_FLOPPY_INT] ),
+
+		.commit_done     ( wc_done ),
+		.commit_addr     ( wc_commit_addr ),
+		.commit_buf_wr   ( wc_buf_wr ),
+		.commit_buf_addr ( wc_buf_addr ),
+		.commit_buf_data ( wc_buf_data ),
+
+		.write_ok        ( ~flp_int_wp ),
+		.loader_busy     ( flp_int_loading ),
+		.dc42            ( flp_int_dc42 ),
+		.flush_req       ( flp_eject_pulse ),
+		.file_blocks     ( flp_file_blocks ),
+
+		.sd_lba          ( flp_sdw_lba ),
+		.sd_rd           ( flp_sdw_rd ),
+		.sd_wr           ( sd_wr[VD_FLOPPY_INT] ),
+		.sd_ack          ( sd_ack[VD_FLOPPY_INT] ),
+		.sd_buff_addr    ( sd_buff_addr ),
+		.sd_buff_dout    ( sd_buff_dout ),
+		.sd_buff_wr      ( sd_buff_wr ),
+		.sd_buff_din     ( sd_buff_din[VD_FLOPPY_INT] ),
+		.busy            ( flp_int_sdw_busy )
+	);
+
+	// The loader owns the slot while it is streaming an image in; the writer
+	// refuses to start a request while loader_busy anyway, so this mux only
+	// ever has to resolve which of the two idle-safe values is presented.
+	assign sd_lba[VD_FLOPPY_INT] = flp_int_loading ? flp_ldr_lba : flp_sdw_lba;
+	assign sd_rd [VD_FLOPPY_INT] = flp_int_loading ? flp_ldr_rd  : flp_sdw_rd;
 
 	// diskEject is set by macos on eject
 	always @(posedge clk_sys) begin

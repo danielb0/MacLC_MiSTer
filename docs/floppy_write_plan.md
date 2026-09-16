@@ -690,6 +690,44 @@ classes of fault; stage 2 needs both.
            for an 800K image — cheap, and it happens once per session);
        (c) zero the fields.
 
+  ★ **DECIDED 2026-09-16 — option (b), AND THE COST MODEL IN ITEMS 3-4 ABOVE
+     IS WRONG.** The owner chose in-container RMW with the header checksums
+     recomputed on eject. Items 3-4 priced that assuming the read half of the
+     read-modify-write comes from the SD CARD. It does not, and that deletes
+     most of the work:
+
+     **SDRAM already holds the whole payload, and it is authoritative.**
+     `floppy_loader.v:23` strips the 84-byte header while streaming, and
+     `size <= img_size_l - 84` — so everything after the header, sector data
+     AND the tag section, is in SDRAM. File block N is exactly
+     `[last 84 bytes of sector N-1][first 428 bytes of sector N]`, and both
+     halves are already there. So each affected block is ASSEMBLED LOCALLY
+     from SDRAM and written out whole. Consequences:
+     - no `sd_rd` side on the writer, no card-fed block buffer, no read
+       arbitration with floppy_loader;
+     - the eject-time checksum pass is a local SDRAM scan, not the 819200-byte
+       card re-read item 4(b) assumed;
+     - a sector write rewrites 84 bytes belonging to the NEIGHBOURING sector,
+       which is safe precisely because the source is SDRAM: those bytes are
+       whatever the image currently holds, not a stale shadow.
+     What genuinely remains: two block writes per commit instead of one
+     (irrelevant — sectors arrive ~10ms apart), the torn-write window, a
+     one-block header rewrite on eject, and BLOCK 0, which is the one block
+     SDRAM cannot supply in full because its first 84 bytes are the stripped
+     header (the loader must therefore keep those 42 words and export them).
+
+     ⚠ **The risk moved, it did not vanish.** The writer now needs an SDRAM
+     READ port, making it a new requester on `rtl/sdram.v`. That is the
+     risk-bearing part of this job, not the DC42 arithmetic: CLAUDE.md
+     requires `verilator/tb_icache_seam.v` normal AND negative control after
+     any sdram.v handshake edit.
+
+     ★ Why NOT (d), normalise-the-file, on reflection: it needs a forked Main
+     for truncate, which would be a SECOND Main dependency after ethernet — a
+     stock-Main user would silently get no DC42 write — and it rewrites the
+     user's archived DiskCopy file into a raw image, which is a surprising
+     thing to do to it.
+
   5. ★ **HOW is explicitly NOT DECIDED (owner, 2026-09-15).** Only *that* DC42
      becomes writable is settled. Everything in items 3-4 is the cost of ONE
      approach — writing back in place, in the container — and a different

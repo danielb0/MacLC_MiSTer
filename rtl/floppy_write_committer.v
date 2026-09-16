@@ -41,12 +41,14 @@
 // convention) and leaves the base-add and the >>1 to the caller, so the two
 // directions stay symmetrical and only one place knows where the image lives.
 //
-// ★ NOT PORTED YET: MacPlus's sd_buf_* persistence tap, which mirrors each word
-// for floppy_sd_writer.v. That is Phase 4. Adding it now would be three
-// outputs nothing drives a load on, i.e. new "assigned but never read"
-// warnings against a baseline we diff every compile (plan §7 defect 1).
-//
-// This module is SDRAM-ONLY. No sd_wr, nothing reaches the user's file.
+// ★ PHASE 4: the sd_buf_* persistence tap IS now ported (2026-09-16). It
+// mirrors each committed word for rtl/floppy_sd_writer.v, which is what
+// actually reaches the user's file. This module itself still only writes
+// SDRAM — it has no sd_wr, no notion of the SD card, and no idea whether the
+// tap is connected to anything. That separation is deliberate: the volatile
+// commit is the part the guest's read-after-write verify exercises, and it
+// stays independently testable (verilator/tb_floppy_commit.v) after the
+// persistence layer exists.
 module floppy_write_committer
 (
 	input             clk,
@@ -66,7 +68,21 @@ module floppy_write_committer
 
 	output            busy,
 	output reg        done,         // 1-clk pulse: sector fully in SDRAM
-	output     [21:0] committed_addr
+	output     [21:0] committed_addr,
+
+	// ── Persistence tap (Phase 4) ───────────────────────────────────────
+	// A mirror of the word stream this module is writing to SDRAM, for
+	// rtl/floppy_sd_writer.v to shadow and push out to the .dsk on the SD
+	// card. It is taken from the SAME registered wr_addr/wr_data the SDRAM
+	// port drives, so the two destinations can never disagree about what was
+	// committed.
+	//   sd_buf_wr follows the LEVEL wr_req, so the shadow word is rewritten on
+	// every cycle a word spends waiting for wr_ack. That is harmless — it is
+	// the same address and the same data each time — and it keeps this a pure
+	// combinational tap with no state of its own to get out of step.
+	output      [7:0] sd_buf_addr,   // word index 0..255 within the sector
+	output     [15:0] sd_buf_data,   // internal convention: EVEN byte in the high half
+	output            sd_buf_wr
 );
 
 	localparam IDLE       = 3'd0,
@@ -83,6 +99,10 @@ module floppy_write_committer
 
 	assign busy           = (state != IDLE);
 	assign committed_addr = base_addr;
+
+	assign sd_buf_addr    = word_idx;
+	assign sd_buf_data    = wr_data;
+	assign sd_buf_wr      = wr_req;
 
 	always @(*) begin
 		case (state)
