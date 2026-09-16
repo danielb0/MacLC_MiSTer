@@ -666,8 +666,11 @@ changed, every one inside MDB/bitmap, the catalog extent or a file extent
 `hfs_check` CONSISTENT, and the source image's off-by-one MDB file count was
 corrected by the Finder as predicted.
 
-Still to do before PR: the guest-side remount check of a DC42 write (trivial
-now the file is right), and stage 2 (MFM/ISM writes).
+★ **GUEST REMOUNT PASS.** Both written images (the DC42 and the raw) were
+remounted on the MiSTer and Speedometer 3.23 launched from each. That is the
+plan's original Phase 4 gate statement — write, eject, remount, the change
+persists — met for both containers, with the byte diff as the strong half.
+**Phase 4 is closed for GCR.** Still to do before PR: stage 2 (MFM/ISM writes).
 
 ### Phase 5 — Hardening
 Port MacPlus's Phase 5 work and its six-defect review list (§7). Stress the
