@@ -1,6 +1,6 @@
 # Read and decode the PFSW probe: floppy_sd_writer's witness word (Phase 4).
 # Field layout is the writer's `dbg` port (rtl/floppy_sd_writer.v):
-#   [31:24] queue overflow count (sat)   [23:16] refused sectors (sat)
+#   [31:24] queue-full REFUSALS = sectors lost (sat)   [23:16] out-of-range refusals (sat)
 #   [15:8]  blocks landed (wraps)         [7:4]  eject flushes started (sat)
 #   [3:0]   pstate
 # Two samples 500 ms apart so a copy in progress shows as a moving landed
@@ -62,4 +62,4 @@ after 500
 set b [rd PFSW]
 puts [format "PFSW = %08X  %s" $a [decode $a]]
 puts [format "PFSW = %08X  %s" $b [decode $b]]
-if {(($a >> 24) & 0xFF) == 0} { puts "OVERFLOW COUNT 0 - the depth-2 queue has kept up so far" } else { puts "*** OVERFLOW COUNT NONZERO - the writer reused an in-flight buffer; a sector on the card may be stale ***" }
+if {(($a >> 24) & 0xFF) == 0} { puts "REFUSAL COUNT 0 - no sector was lost (the queue never filled)" } else { puts "*** REFUSAL COUNT NONZERO - the sector queue filled and commits were REFUSED; those sectors are NOT on the card ***" }

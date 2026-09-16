@@ -643,6 +643,24 @@ ack-fall, no cross-talk of acks); Quartus A&S; then on hardware the SAME 450
 KB copy with `PFSW` overflow == 0 and a byte-for-byte fork diff against the
 source volume — the test that failed 4.
 
+★ **HARDWARE GATE PASS 2026-09-16 evening** — commit `60d1e95`, fit
+`MacLC_60d1e95b_phase4b.rbf` (STA +0.157 ns). The same Speedometer 3.23
+folder (450 KB, ~900 sectors) copied onto `Blank800K (DC42).dsk`, then
+guest-ejected:
+- `PFSW` after the copy `00001800`, after the eject `00001B10`: refusals 0,
+  out-of-range 0, flushes 1, idle.
+- Written image vs baseline: header words changed = {36, 37} only, data
+  checksum stored == recomputed (2f6a8a58), tag checksum and tag section
+  untouched, 901 payload sectors changed (MDB/bitmap, catalog, the two
+  files) and nothing else.
+- **Both forks byte-IDENTICAL to the source on `boot.vhd`**: Speedometer
+  3.23 rsrc 409015 B, Machine Records rsrc 41203 B. `hfs_check` VOLUME
+  CONSISTENT. The four wrong sectors the card-sourced design produced on
+  this exact test are gone.
+Still to do before PR: the guest-side remount check of a DC42 write (trivial
+now the file is right), a raw-image soak with the same witness, and stage 2
+(MFM/ISM writes).
+
 ### Phase 5 — Hardening
 Port MacPlus's Phase 5 work and its six-defect review list (§7). Stress the
 structures nothing exercises incidentally: commit-queue depth, write-to-one-
