@@ -685,9 +685,15 @@ side-1 field is REJECTED. All 80 tracks: 3151 checks PASS; the double-sided
 run is unchanged at 6269. The decoder's single-sided address formula is the
 encoder's read-side one verbatim (`soff*512`, no doubling). Downstream is
 geometry-blind: committer, queue and writer see a payload byte offset;
-`file_blocks` = 800 raw / 818 tagged DC42. What remains is a hardware run:
-`C:/temp/Mac/Test disks/EraseMe400K.dsk` (raw, MFS, 387 KB free) is the
-candidate, with a copy kept as baseline.
+`file_blocks` = 800 raw / 818 tagged DC42.
+
+★ **OWNER'S RULING, 2026-09-16 (said in that session): 400K writes are NOT a
+gate.** The hardware attempt on `EraseMe400K.dsk` failed in the GUEST with
+error -4 (`unimpErr`): every 400K image to hand is MFS — fifteen of fifteen —
+and System 7.5 mounts MFS read-only, so the Finder refuses the copy before a
+sector reaches the core (PFSW showed no 400K writes). 400K HFS volumes are
+technically possible but not what anyone has, so the offline proof above is
+where 400K support stops. No hardware run is required for the PR.
 
 ### Phase 5 — Hardening
 Port MacPlus's Phase 5 work and its six-defect review list (§7). Stress the
