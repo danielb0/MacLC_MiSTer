@@ -581,6 +581,68 @@ important half** — it catches a wrong-LBA bug that "it still boots" would miss
 UK101's attempt-2 post-mortem is what a byte-diff buys you: it located a
 263-byte displacement and reconstructed the cause from it.
 
+### Phase 4b — Persistence, second design: SDRAM-sourced, unbounded backlog
+
+**Why (2026-09-16).** The card-sourced writer's 450 KB soak FAILED: the
+depth-2 shadow queue overflowed twice and four sectors of the copied
+application were wrong on the card while the volume still checked out (§6.2,
+review finding). Root cause is the environment, not the RTL: Main opens a
+writable image `O_RDWR|O_SYNC`, so each block is a synchronous card write with
+bursty latency, against a sector every ~11 ms. Any fixed-depth copy of the
+data will overflow on a long enough stall, and it does so silently. **Owner
+chose option B**: keep no second copy of the data at all.
+
+**Fallback.** `floppy-write` stays at `ce07e67` (tag `phase4-card-sourced`,
+RBF `scratch/phase4/MacLC_ce07e672_phase4dc42.rbf`). This work is on branch
+`floppy-write-sdram-src`.
+
+**Design.**
+1. **Queue sector NUMBERS, not data.** On `commit_done && write_ok` the
+   writer pushes the sector index (`commit_addr[21:9]`) into a FIFO (1024
+   deep x 13 bits, 2 M10K). The committer has already landed the data in
+   SDRAM, which always holds the NEWEST version, so a sector re-written while
+   still queued is simply queued twice and written twice with the latest
+   contents — no dedupe, no bitmap, no re-dirty tracking. 1024 pending
+   sectors is ~11 s of write backlog; if even that fills, the push is REFUSED
+   and a sticky `lost` flag is raised (option C's safety net — visible, never
+   corrupting).
+2. **Fetch from SDRAM at write time** into ONE 256x16 block buffer, then
+   present it to hps_io as before (same output byte swap). Raw: block N =
+   sector N. DC42: block N = payload words `N*256-42 .. N*256+213`, i.e. the
+   tail of sector N-1 and the head of sector N, both straight from SDRAM; the
+   card is never READ any more, so a DC42 sector costs two writes, not two
+   reads + two writes. **Block 0's first 42 words are the stripped header**,
+   which SDRAM does not have: `floppy_loader.v` now keeps them (captured as
+   file block 0 streams past at mount) and exports a small read port.
+3. **SDRAM access = the existing Ethernet DMA port, shared.** `rtl/sdram.v`'s
+   `eth_*` requester is a proven LEVEL two-phase read/write port that never
+   touches `cpu_done`, starts only on idle edges, and is already crossed
+   clk_sys -> clk_64 correctly. A small arbiter module (`rtl/eth_port_arb.v`)
+   in MacLC.sv grants it per transaction to pds_enet or the floppy writer,
+   pds_enet first, lock held from request-rise through ack-fall (a grant that
+   flipped with `eth_ack` still high would hand the next client a spurious
+   ack), and the muxed bundle is REGISTERED before it reaches the controller
+   (pds_enet's own note: combinational depth on that crossing broke hold).
+   **`rtl/sdram.v` is not edited.** Bandwidth: one word per idle
+   clk_sys-aligned edge, ~0.2 us/word unloaded, so a block fetch is ~50-100 us
+   against an 11 ms sector.
+4. **Eject flush = SDRAM scan.** Drain the FIFO, then read the whole data
+   section from SDRAM accumulating `ror32(sum + word)` (~0.1-0.2 s for
+   800K), then write block 0 assembled from the loader's header words with
+   36/37 substituted plus sector 0's head from SDRAM. The tag checksum is
+   left as stored (tags are never written).
+5. **Unchanged from 4:** `write_ok` as the single gate, `file_blocks`
+   partial-tail refusal, remount ABORT (now also empties the FIFO), the
+   `PFSW` witness word (overflow byte now counts FIFO refusals).
+
+**Gate.** `tb_floppy_sd_writer.v` rewritten around an SDRAM model on the
+eth-port protocol + the hps_io model (byte order, raw, DC42 assembly incl.
+block 0, flush, refusals, remount abort, FIFO-full refusal, re-written-
+while-queued ordering); `tb_eth_port_arb.v` for the arbiter (lock through
+ack-fall, no cross-talk of acks); Quartus A&S; then on hardware the SAME 450
+KB copy with `PFSW` overflow == 0 and a byte-for-byte fork diff against the
+source volume — the test that failed 4.
+
 ### Phase 5 — Hardening
 Port MacPlus's Phase 5 work and its six-defect review list (§7). Stress the
 structures nothing exercises incidentally: commit-queue depth, write-to-one-

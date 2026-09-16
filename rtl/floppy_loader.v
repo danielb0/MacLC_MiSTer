@@ -67,6 +67,15 @@ module floppy_loader
 	output reg        readonly,      // latched at THIS slot's own mount pulse
 	output reg        raw_img,       // 1 = raw sector image (writable in stage 1)
 	output reg        is_dc42,       // 1 = a DiskCopy 4.2 image was detected
+	// ── file block 0's first 42 words, kept for the SD writer (Phase 4b) ──
+	// The 84-byte DC42 header is stripped from SDRAM, so it is the one part
+	// of file block 0 the SDRAM-sourced writer cannot fetch. Captured here
+	// as block 0 streams past at mount, in the INTERNAL (swapped) word
+	// convention like everything else in SDRAM. Registered read port:
+	// hdr_data is valid the cycle after hdr_addr. Words 36/37 are the data
+	// checksum as it stood at mount; the writer substitutes its own.
+	input       [5:0] hdr_addr,
+	output reg [15:0] hdr_data,
 	output reg  [7:0] dc42_fmt       // DC42 byte 0x50: 0=400K 1=800K 2=720K 3=1440K
 	                                 // ★ For a DC42 image `size` CANNOT decide the
 	                                 // geometry: tags trail the sector data, so an
@@ -92,6 +101,16 @@ module floppy_loader
 	// byte pair: the disk mounts and is unreadable.
 	always @(posedge clk_sys)
 		if (sd_buff_wr && sd_ack) buf_ram[sd_buff_addr[7:0]] <= sw_data;
+
+	// header store: every mount rewrites it (a raw image's "header" is just
+	// its first 84 bytes, harmless — the writer only consults it for DC42).
+	reg [15:0] hdr_ram [0:63];
+	always @(posedge clk_sys) begin
+		if (state == S_RD && sd_buff_wr && sd_ack && sd_lba == 32'd0 &&
+		    sd_buff_addr[7:0] < 8'd42)
+			hdr_ram[sd_buff_addr[5:0]] <= sw_data;
+		hdr_data <= hdr_ram[hdr_addr];
+	end
 
 	localparam S_IDLE   = 3'd0;
 	localparam S_RD     = 3'd1;   // sd_rd asserted, waiting for the sector

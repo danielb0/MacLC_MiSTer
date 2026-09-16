@@ -53,6 +53,8 @@ module tb_floppy_loader;
 	wire        loading, done, raw_img, readonly, is_dc42;
 	wire  [7:0] dc42_fmt;
 	wire [63:0] size;
+	reg   [5:0] hdr_addr = 0;     // Phase 4b header store read port
+	wire [15:0] hdr_data;
 
 	localparam [23:0] BASE = 24'h600000;
 
@@ -65,7 +67,7 @@ module tb_floppy_loader;
 		.wr_addr(wr_addr), .wr_data(wr_data), .wr_req(wr_req), .wr_ack(wr_ack),
 		.loading(loading), .done(done), .size(size),
 		.readonly(readonly), .raw_img(raw_img),
-		.is_dc42(is_dc42), .dc42_fmt(dc42_fmt)
+		.is_dc42(is_dc42), .hdr_addr(hdr_addr), .hdr_data(hdr_data), .dc42_fmt(dc42_fmt)
 	);
 
 	integer errors = 0;
@@ -275,6 +277,18 @@ module tb_floppy_loader;
 		for (i = 0; i < (4 * 256) - 42; i = i + 1)
 			if (first_bad < 0 && sdram[i] === 16'hEEEE) first_bad = i;
 		ck(first_bad < 0, "dc42: no header filler word reached SDRAM");
+
+		// The stripped header must be KEPT for the SD writer (Phase 4b), in
+		// the internal swapped convention, readable two edges after hdr_addr.
+		@(posedge clk); #1 hdr_addr = 6'd41;
+		@(posedge clk); @(posedge clk); #1;
+		ck(hdr_data === 16'h0100, "dc42: header word 41 (the magic) kept, swapped");
+		@(posedge clk); #1 hdr_addr = 6'd0;
+		@(posedge clk); @(posedge clk); #1;
+		ck(hdr_data === 16'h0A41, "dc42: header word 0 (name length) kept, swapped");
+		@(posedge clk); #1 hdr_addr = 6'd40;
+		@(posedge clk); @(posedge clk); #1;
+		ck(hdr_data === {DC42_TEST_FMT, 8'h00}, "dc42: header word 40 (format byte) kept, swapped");
 
 		// ══ 4. unmount must not start a load ═══════════════════════════════
 		$display("== 4. a zero-size mount pulse is an UNMOUNT");

@@ -2518,7 +2518,10 @@ module emu
 	// shared slot port with two drivers is Quartus Error 10028 (and Verilator
 	// would not have said a word). Same shape as MacPlus.sv:805.
 	wire [31:0] flp_ldr_lba, flp_sdw_lba;
-	wire        flp_ldr_rd,  flp_sdw_rd;
+	wire        flp_ldr_rd;
+	// floppy_loader's header store, read by the writer (DC42 block 0)
+	wire  [5:0] flp_hdr_addr;
+	wire [15:0] flp_hdr_data;
 	// The guest's eject, as a single pulse. This is what triggers the DC42
 	// header's checksum rewrite, and the guest eject is the only moment it can
 	// happen: the file is still mounted in hps_io, so the slot still reaches
@@ -2553,7 +2556,9 @@ module emu
 		.wr_req(flp_int_wr_req),   .wr_ack(flp_int_wr_ack),
 		.loading(flp_int_loading), .done(flp_int_done), .size(flp_int_size),
 		.readonly(flp_int_ro), .raw_img(flp_int_raw),
-		.is_dc42(flp_int_dc42), .dc42_fmt(flp_int_fmt)
+		.is_dc42(flp_int_dc42),
+		.hdr_addr(flp_hdr_addr), .hdr_data(flp_hdr_data),
+		.dc42_fmt(flp_int_fmt)
 	);
 
 	// Write-protect, three terms, any one of which locks the disk:
@@ -2566,7 +2571,7 @@ module emu
 	// plumbed for exactly that.
 	assign flp_int_wp = ~status[14] || flp_int_ro;
 
-	// ── Phase 4: committed sectors reach the user's file ───────────────────
+	// ── Phase 4b: committed sectors reach the user's file ──────────────────
 	// Everything upstream of here is volatile: the committer lands a verified
 	// sector in the SDRAM image and the guest's read-after-write verify is
 	// satisfied, but a remount re-downloads the file over it
@@ -2578,17 +2583,26 @@ module emu
 	// and the slot did not mount read-only. It is the same condition that
 	// unlocks WRTPRT, so the guest is never told a disk is writable when the
 	// card is not going to take the write. There is no container term: DC42
-	// is writable (owner's ruling 2026-09-15, plan section 6.2), and the
-	// writer handles the two layouts itself from `dc42` — a raw sector is one
-	// block written straight from the shadow, a DC42 sector is a read-modify-
-	// write of blocks N and N+1 against the card, with the header's data
-	// checksum recomputed on the guest's eject. Details in the writer's header
-	// (LC additions 2-5).
+	// is writable (owner's ruling 2026-09-15, plan section 6.2).
+	//
+	// The writer keeps NO copy of the data (plan Phase 4b, after the card-
+	// sourced design's 450 KB soak overflowed its shadow queue and corrupted
+	// four sectors): it queues sector numbers and fetches each block from
+	// SDRAM — the same image region the committer wrote — at write time,
+	// through the SDRAM controller's Ethernet-DMA requester shared with
+	// pds_enet by eth_port_arb below. A raw sector is one block; a DC42
+	// sector is blocks N and N+1 assembled from SDRAM (block 0's stripped
+	// header comes from the loader's header store); the header's data
+	// checksum is recomputed from an SDRAM scan on the guest's eject. The
+	// writer never READS the card, so the slot's sd_rd is the loader's alone.
 	// file_blocks is the count of COMPLETE blocks in the FILE (see above); the
 	// writer refuses any block at or past it.
 	wire        flp_int_sdw_busy;
 	wire        flp_sdw_wr;
 	wire [31:0] flp_int_sdw_dbg;
+	wire        flp_mem_req, flp_mem_ack;
+	wire [23:0] flp_mem_addr;
+	wire [15:0] flp_mem_dout;
 	floppy_sd_writer floppy_sd_writer_int
 	(
 		.clk             ( clk_sys ),
@@ -2597,9 +2611,6 @@ module emu
 
 		.commit_done     ( wc_done ),
 		.commit_addr     ( wc_commit_addr ),
-		.commit_buf_wr   ( wc_buf_wr ),
-		.commit_buf_addr ( wc_buf_addr ),
-		.commit_buf_data ( wc_buf_data ),
 
 		.write_ok        ( ~flp_int_wp ),
 		.loader_busy     ( flp_int_loading ),
@@ -2607,39 +2618,63 @@ module emu
 		.flush_req       ( flp_eject_pulse ),
 		.file_blocks     ( flp_file_blocks ),
 
+		// the floppy image's SDRAM base, as a WORD address — the same
+		// $600000 floppy_loader is given and wc_word_addr adds below
+		.img_base        ( 24'h600000 ),
+		.hdr_addr        ( flp_hdr_addr ),
+		.hdr_data        ( flp_hdr_data ),
+
+		.mem_req         ( flp_mem_req ),
+		.mem_addr        ( flp_mem_addr ),
+		.mem_ack         ( flp_mem_ack ),
+		.mem_dout        ( flp_mem_dout ),
+
 		.sd_lba          ( flp_sdw_lba ),
-		.sd_rd           ( flp_sdw_rd ),
 		.sd_wr           ( flp_sdw_wr ),
 		.sd_ack          ( sd_ack[VD_FLOPPY_INT] ),
 		.sd_buff_addr_i  ( sd_buff_addr ),
-		.sd_buff_dout    ( sd_buff_dout ),
-		.sd_buff_wr      ( sd_buff_wr ),
 		.sd_buff_din     ( sd_buff_din[VD_FLOPPY_INT] ),
 		.busy            ( flp_int_sdw_busy ),
 		.dbg             ( flp_int_sdw_dbg )
 	);
 
+	// The controller's eth port, shared: pds_enet (priority) and the floppy
+	// writer. The arbiter locks the grant through ack-fall and registers the
+	// muxed bundle — see rtl/eth_port_arb.v for both reasons. rtl/sdram.v is
+	// unchanged; it still sees exactly one requester on that port.
+	wire        mem_eth_req, mem_eth_we, mem_eth_ack;
+	wire [23:0] mem_eth_addr;
+	wire [15:0] mem_eth_din, mem_eth_dout;
+	eth_port_arb eth_port_arb_i
+	(
+		.clk    ( clk_sys ),
+		.reset  ( !pll_locked_s ),
+		.a_req  ( pds_eth_req  ), .a_we ( pds_eth_we ), .a_addr ( pds_eth_addr ),
+		.a_din  ( pds_eth_din  ), .a_ack ( pds_eth_ack ), .a_dout ( pds_eth_dout ),
+		.b_req  ( flp_mem_req  ), .b_we ( 1'b0 ),       .b_addr ( flp_mem_addr ),
+		.b_din  ( 16'd0 ),        .b_ack ( flp_mem_ack ), .b_dout ( flp_mem_dout ),
+		.m_req  ( mem_eth_req  ), .m_we ( mem_eth_we ), .m_addr ( mem_eth_addr ),
+		.m_din  ( mem_eth_din  ), .m_ack ( mem_eth_ack ), .m_dout ( mem_eth_dout )
+	);
+
 	// The loader owns the slot while it is streaming an image in. The writer
 	// aborts to idle on the mount pulse and refuses to start while
-	// loader_busy, so these muxes normally only choose between idle values —
-	// but sd_wr is masked too, as the belt to that brace. A DC42 sector is a
-	// four-request transaction and the eject flush a ~1600-request one, and
-	// sd_ack is shared per SLOT, so a writer FSM left running during a mount
-	// would be walked forward by the LOADER's acks and end by raising sd_wr
-	// against the loader's LBA in the NEW file (writer header, LC addition 5).
-	// The abort is the fix; this mask means a future edit to the writer that
-	// reintroduces the state cannot reach the card from here.
+	// loader_busy, so the lba mux normally only chooses between idle values —
+	// but sd_wr is masked too, as the belt to that brace: sd_ack is shared
+	// per SLOT, and a writer FSM left running during a mount would be walked
+	// forward by the LOADER's acks (Phase 4 review finding). The abort is the
+	// fix; this mask means a future edit to the writer that reintroduces the
+	// state cannot reach the card from here.
 	assign sd_lba[VD_FLOPPY_INT] = flp_int_loading ? flp_ldr_lba : flp_sdw_lba;
-	assign sd_rd [VD_FLOPPY_INT] = flp_int_loading ? flp_ldr_rd  : flp_sdw_rd;
+	assign sd_rd [VD_FLOPPY_INT] = flp_ldr_rd;
 	assign sd_wr [VD_FLOPPY_INT] = flp_int_loading ? 1'b0        : flp_sdw_wr;
 
 `ifdef USE_DBG_OBSERVER
-	// PFSW: floppy_sd_writer witness — the two silent failure modes the
-	// hardware gate must be able to see (queue overflow, refused sector) plus
-	// blocks landed / flushes started / pstate. Field decode at the writer's
-	// dbg port. A sustained large-file copy onto a DC42 with [31:24] still 0
-	// afterwards is the evidence that four SD transactions per sector keep
-	// up with the ~10 ms sector cadence.
+	// PFSW: floppy_sd_writer witness. [31:24] = queue REFUSALS, i.e. sectors
+	// LOST because 1024 were already pending (the card stalled ~11 s) —
+	// must read 0 after a sustained large-file copy; [23:16] out-of-range
+	// refusals; [15:8] blocks landed; [7:4] flushes; [3:0] pstate. Field
+	// decode at the writer's dbg port; reader: scripts/pfsw_probe.tcl.
 	altsource_probe #(
 		.instance_id ("PFSW"), .probe_width (32), .source_width(1),
 		.sld_auto_instance_index ("YES")
@@ -3019,15 +3054,16 @@ module emu
 		.dl_din         ( sdram_dldin_q            ),
 		.dl_ack         ( sdram_dl_ack             ),
 
-		// PDS Ethernet guest-RAM DMA port (rtl/pds/pds_enet.sv, Phase 3).
-		// pds_enet's outputs are already clk_sys registers set before the
+		// Ethernet guest-RAM DMA port (rtl/pds/pds_enet.sv, Phase 3), since
+		// Phase 4b shared with the floppy SD writer through eth_port_arb,
+		// whose outputs are clk_sys registers set one edge before the
 		// request rises — the same settled-value shape as the _q bundle.
-		.eth_req        ( pds_eth_req              ),
-		.eth_we         ( pds_eth_we               ),
-		.eth_addr       ( pds_eth_addr             ),
-		.eth_din        ( pds_eth_din              ),
-		.eth_ack        ( pds_eth_ack              ),
-		.eth_dout       ( pds_eth_dout             ),
+		.eth_req        ( mem_eth_req              ),
+		.eth_we         ( mem_eth_we               ),
+		.eth_addr       ( mem_eth_addr             ),
+		.eth_din        ( mem_eth_din              ),
+		.eth_ack        ( mem_eth_ack              ),
+		.eth_dout       ( mem_eth_dout             ),
 
 		.cpu_done       ( sdram_cpu_done           ),
 		.cpu_dout       ( sdram_cpu_dout           )
