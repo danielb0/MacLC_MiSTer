@@ -20,6 +20,15 @@ PROVENANCE: ported from MacPlus_MiSTer sim/gen_image.py; see
 scripts/gcr_common.py for why the port is sound.
 
 Usage:  python scripts/gcr_gen_image.py [--outdir scratch/gcr_phase0] [--hex]
+        python scripts/gcr_gen_image.py --hex --single   # 400K: image400.bin/.hex
+
+--single (added 2026-09-16) builds the SINGLE-SIDED 400K layout the encoder
+and decoder use with sides=0: soff*512 with no doubling, side 0 only, 800
+sectors, 409600 bytes. It exists because 400K writes had no bench at all --
+both GCR benches hard-coded sides=1 -- and the double-sided image cannot
+stand in: its self-identifying bytes describe the tuple double-sided
+geometry puts at that address, so under sides=0 every track but 0 reads
+"payload wrong" while the address check passes.
 """
 import argparse
 import pathlib
@@ -28,7 +37,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from gcr_common import spt_of, soff_of, IMAGE_SIZE_800K, TOTAL_SECTORS_PER_SIDE
 
-SIDES_PARAM = 1  # the encoder's `sides` port for this synthetic disk (double-sided)
+SIDES_PARAM = 1  # the encoder's `sides` port for this synthetic disk; --single sets 0
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_OUT = REPO / "scratch" / "gcr_phase0"
@@ -57,10 +66,11 @@ def sector_pattern(track: int, side: int, sector: int) -> bytes:
 def build_image() -> bytearray:
     # 0xEE poison: a sector still holding it was never written, which means
     # addr_of and the zone geometry disagree about where that sector lives.
-    img = bytearray(b"\xee" * IMAGE_SIZE_800K)
+    img = bytearray(b"\xee" * (IMAGE_SIZE_800K if SIDES_PARAM else IMAGE_SIZE_800K // 2))
+    nsides = 2 if SIDES_PARAM else 1
     written = 0
     for track in range(80):
-        for side in range(2):
+        for side in range(nsides):
             for sector in range(spt_of(track)):
                 a = addr_of(track, side, sector, 0)
                 if a + 512 > len(img):
@@ -68,8 +78,8 @@ def build_image() -> bytearray:
                         f"track {track} side {side} sector {sector} addresses past end of image")
                 img[a:a + 512] = sector_pattern(track, side, sector)
                 written += 1
-    if written != TOTAL_SECTORS_PER_SIDE * 2:
-        raise RuntimeError(f"wrote {written} sectors, expected {TOTAL_SECTORS_PER_SIDE * 2}")
+    if written != TOTAL_SECTORS_PER_SIDE * nsides:
+        raise RuntimeError(f"wrote {written} sectors, expected {TOTAL_SECTORS_PER_SIDE * nsides}")
     if b"\xee" * 512 in bytes(img):
         raise RuntimeError("a 512-byte run of poison survived: the geometry leaves a hole")
     return img
@@ -90,18 +100,23 @@ def main() -> int:
     ap.add_argument("--outdir", default=str(DEFAULT_OUT))
     ap.add_argument("--hex", action="store_true",
                     help="also write image.hex for $readmemh (the RTL testbench needs it)")
+    ap.add_argument("--single", action="store_true",
+                    help="single-sided 400K layout (sides=0); writes image400.bin/.hex")
     args = ap.parse_args()
+    global SIDES_PARAM
+    SIDES_PARAM = 0 if args.single else 1
+    stem = "image400" if args.single else "image"
 
     self_check()
     out = pathlib.Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
 
     img = build_image()
-    (out / "image.bin").write_bytes(img)
-    print(f"image: {len(img)} bytes ({len(img)/1024:.1f} KB) -> {out / 'image.bin'}")
+    (out / f"{stem}.bin").write_bytes(img)
+    print(f"image: {len(img)} bytes ({len(img)/1024:.1f} KB) -> {out / (stem + '.bin')}")
 
     if args.hex:
-        hex_path = out / "image.hex"
+        hex_path = out / f"{stem}.hex"
         with hex_path.open("w", newline="\n") as f:
             f.write("".join(f"{b:02x}\n" for b in img))
         print(f"hex:   {hex_path.stat().st_size} bytes -> {hex_path}")

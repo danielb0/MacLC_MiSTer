@@ -50,6 +50,10 @@
  *
  * Plusargs:
  *   +alltracks   sweep all 80 tracks x 2 sides (default: 0, 16, 40, 79 x 2)
+ *   +single      SINGLE-SIDED (400K) geometry: sides=0 on both encoder and
+ *                decoder, side 0 only, and a side-1 field must be REJECTED.
+ *                Added 2026-09-16 when 400K writes were found to have no
+ *                bench at all (both GCR benches hard-coded sides=1).
  *   +ncap=N      bytes fed per positive track (default 20000, >2 revolutions)
  *   +imghex=F    $readmemh source (default scratch/gcr_phase0/image.hex)
  *   +verbose     print every accepted sector
@@ -350,12 +354,15 @@ module tb_floppy_track_decoder;
    integer t, s;
    reg [8*256-1:0] imghex;
    reg alltracks;
+   reg single;
 
    initial begin
       CYCLES  = 20000;
       imghex  = "scratch/gcr_phase0/image.hex";
       corrupt_idx = -1;
       alltracks = $test$plusargs("alltracks");
+      single    = $test$plusargs("single");
+      if (single) sides = 1'b0;
       verbose   = $test$plusargs("verbose");
       if ($value$plusargs("ncap=%d",   CYCLES)) ;
       if ($value$plusargs("imghex=%s", imghex)) ;
@@ -363,18 +370,31 @@ module tb_floppy_track_decoder;
       $readmemh(imghex, mem);
       $display("tb_floppy_track_decoder: image=%0s ncap=%0d gap=%0d %0s",
                imghex, CYCLES, READY_GAP, alltracks ? "ALL TRACKS" : "representative");
+      if (single) $display("tb_floppy_track_decoder: SINGLE-SIDED geometry (400K)");
 
       // === positive: RTL encoder -> RTL decoder round-trip ===================
       $display("--- positive: round-trip ---");
       if (alltracks) begin
          for (t = 0; t < 80; t = t + 1)
-            for (s = 0; s < 2; s = s + 1)
+            for (s = 0; s < (single ? 1 : 2); s = s + 1)
                positive_track(t, s[0]);
+      end else if (single) begin
+         positive_track(0, 1'b0); positive_track(16, 1'b0);
+         positive_track(40, 1'b0); positive_track(79, 1'b0);
       end else begin
          positive_track(0,  1'b0);  positive_track(0,  1'b1);
          positive_track(16, 1'b0);  positive_track(16, 1'b1);
          positive_track(40, 1'b0);  positive_track(40, 1'b1);
          positive_track(79, 1'b0);  positive_track(79, 1'b1);
+      end
+
+      // single-sided: a side-1 field must never be accepted (the decoder's
+      // `side && !sides` reject), whatever the encoder puts on the stream
+      if (single) begin
+         $display("--- single-sided: side 1 must be rejected ---");
+         run_stream(40, 1'b1, spt_of(40) * SECTOR_PITCH);
+         chk(n_valid == 0, "single-sided disk accepted a side-1 field");
+         chk(n_reject > 0, "single-sided disk: side-1 fields did not pulse reject");
       end
 
       // === the field layout this bench's offsets assume =====================

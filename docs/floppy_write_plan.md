@@ -673,6 +673,22 @@ plan's original Phase 4 gate statement — write, eject, remount, the change
 persists — met for both containers, with the byte diff as the strong half.
 **Phase 4 is closed for GCR.** Still to do before PR: stage 2 (MFM/ISM writes).
 
+★ **400K (single-sided) — offline-proven 2026-09-16, not yet on hardware.**
+The owner asked. Neither GCR bench had ever run with `sides=0`: both
+hard-coded double-sided, and the synthetic image's self-identifying bytes
+describe the tuple DOUBLE-sided geometry puts at each address, so it cannot
+stand in (under sides=0 every track but 0 reads "payload wrong" while the
+address check passes — a bench artefact, not an RTL one). Fixed:
+`scripts/gcr_gen_image.py --single` mints the 400K layout (image400.hex) and
+`tb_floppy_track_decoder.v +single` runs sides=0, side 0 only, and asserts a
+side-1 field is REJECTED. All 80 tracks: 3151 checks PASS; the double-sided
+run is unchanged at 6269. The decoder's single-sided address formula is the
+encoder's read-side one verbatim (`soff*512`, no doubling). Downstream is
+geometry-blind: committer, queue and writer see a payload byte offset;
+`file_blocks` = 800 raw / 818 tagged DC42. What remains is a hardware run:
+`C:/temp/Mac/Test disks/EraseMe400K.dsk` (raw, MFS, 387 KB free) is the
+candidate, with a copy kept as baseline.
+
 ### Phase 5 — Hardening
 Port MacPlus's Phase 5 work and its six-defect review list (§7). Stress the
 structures nothing exercises incidentally: commit-queue depth, write-to-one-
