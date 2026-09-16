@@ -657,9 +657,17 @@ guest-ejected:
   3.23 rsrc 409015 B, Machine Records rsrc 41203 B. `hfs_check` VOLUME
   CONSISTENT. The four wrong sectors the card-sourced design produced on
   this exact test are gone.
+★ **RAW SOAK PASS, same evening.** The same folder onto the raw
+`Blank800Kformatted.dsk` (baseline = the unwritten file): `PFSW` `0000A810`
+= refusals 0, out-of-range 0, flushes unchanged at 1 (correct: a raw image
+has no header to rewrite, so the eject triggers nothing), idle. 901 sectors
+changed, every one inside MDB/bitmap, the catalog extent or a file extent
+(a script check, not an eyeball); both forks byte-identical to `boot.vhd`;
+`hfs_check` CONSISTENT, and the source image's off-by-one MDB file count was
+corrected by the Finder as predicted.
+
 Still to do before PR: the guest-side remount check of a DC42 write (trivial
-now the file is right), a raw-image soak with the same witness, and stage 2
-(MFM/ISM writes).
+now the file is right), and stage 2 (MFM/ISM writes).
 
 ### Phase 5 — Hardening
 Port MacPlus's Phase 5 work and its six-defect review list (§7). Stress the
