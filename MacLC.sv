@@ -2573,25 +2573,22 @@ module emu
 	// (floppy_loader.v:6 loads into the SAME SDRAM region), so the write is
 	// gone. This module is what makes it durable.
 	//
-	// write_ok is the single gate, and it is deliberately narrower than
-	// flp_int_wp:
-	//   ~flp_int_wp   — the OSD Floppy Write toggle is On and the slot did not
-	//                   mount read-only. Same condition that unlocks WRTPRT,
-	//                   so the guest is never told a disk is writable when the
-	//                   card is not going to take the write.
-	//   flp_int_raw   — RAW IMAGES ONLY for now. A DC42 file puts sector N at
-	//                   84 + N*512, so a sector write is a fixed 428/84 split
-	//                   across two blocks and the header's payload checksums
-	//                   cannot be updated incrementally (plan section 6.2
-	//                   items 3-5, decision still OPEN). Until that is
-	//                   settled, DC42 mounts keep exactly the Phase 3b
-	//                   behaviour: the guest's writes work and live in SDRAM
-	//                   for as long as the disk stays mounted.
-	// size_blocks comes from the loader's own payload size, so it is the
-	// NORMALISED length (DC42's 84-byte header already stripped) and the
-	// writer's end-of-image refusal keys off the same number the read path
-	// uses.
+	// write_ok is the single gate on a sector reaching the card, decided HERE
+	// and nowhere else: ~flp_int_wp, i.e. the OSD Floppy Write toggle is On
+	// and the slot did not mount read-only. It is the same condition that
+	// unlocks WRTPRT, so the guest is never told a disk is writable when the
+	// card is not going to take the write. There is no container term: DC42
+	// is writable (owner's ruling 2026-09-15, plan section 6.2), and the
+	// writer handles the two layouts itself from `dc42` — a raw sector is one
+	// block written straight from the shadow, a DC42 sector is a read-modify-
+	// write of blocks N and N+1 against the card, with the header's data
+	// checksum recomputed on the guest's eject. Details in the writer's header
+	// (LC additions 2-5).
+	// file_blocks is the count of COMPLETE blocks in the FILE (see above); the
+	// writer refuses any block at or past it.
 	wire        flp_int_sdw_busy;
+	wire        flp_sdw_wr;
+	wire [31:0] flp_int_sdw_dbg;
 	floppy_sd_writer floppy_sd_writer_int
 	(
 		.clk             ( clk_sys ),
@@ -2612,20 +2609,42 @@ module emu
 
 		.sd_lba          ( flp_sdw_lba ),
 		.sd_rd           ( flp_sdw_rd ),
-		.sd_wr           ( sd_wr[VD_FLOPPY_INT] ),
+		.sd_wr           ( flp_sdw_wr ),
 		.sd_ack          ( sd_ack[VD_FLOPPY_INT] ),
-		.sd_buff_addr    ( sd_buff_addr ),
+		.sd_buff_addr_i  ( sd_buff_addr ),
 		.sd_buff_dout    ( sd_buff_dout ),
 		.sd_buff_wr      ( sd_buff_wr ),
 		.sd_buff_din     ( sd_buff_din[VD_FLOPPY_INT] ),
-		.busy            ( flp_int_sdw_busy )
+		.busy            ( flp_int_sdw_busy ),
+		.dbg             ( flp_int_sdw_dbg )
 	);
 
-	// The loader owns the slot while it is streaming an image in; the writer
-	// refuses to start a request while loader_busy anyway, so this mux only
-	// ever has to resolve which of the two idle-safe values is presented.
+	// The loader owns the slot while it is streaming an image in. The writer
+	// aborts to idle on the mount pulse and refuses to start while
+	// loader_busy, so these muxes normally only choose between idle values —
+	// but sd_wr is masked too, as the belt to that brace. A DC42 sector is a
+	// four-request transaction and the eject flush a ~1600-request one, and
+	// sd_ack is shared per SLOT, so a writer FSM left running during a mount
+	// would be walked forward by the LOADER's acks and end by raising sd_wr
+	// against the loader's LBA in the NEW file (writer header, LC addition 5).
+	// The abort is the fix; this mask means a future edit to the writer that
+	// reintroduces the state cannot reach the card from here.
 	assign sd_lba[VD_FLOPPY_INT] = flp_int_loading ? flp_ldr_lba : flp_sdw_lba;
 	assign sd_rd [VD_FLOPPY_INT] = flp_int_loading ? flp_ldr_rd  : flp_sdw_rd;
+	assign sd_wr [VD_FLOPPY_INT] = flp_int_loading ? 1'b0        : flp_sdw_wr;
+
+`ifdef USE_DBG_OBSERVER
+	// PFSW: floppy_sd_writer witness — the two silent failure modes the
+	// hardware gate must be able to see (queue overflow, refused sector) plus
+	// blocks landed / flushes started / pstate. Field decode at the writer's
+	// dbg port. A sustained large-file copy onto a DC42 with [31:24] still 0
+	// afterwards is the evidence that four SD transactions per sector keep
+	// up with the ~10 ms sector cadence.
+	altsource_probe #(
+		.instance_id ("PFSW"), .probe_width (32), .source_width(1),
+		.sld_auto_instance_index ("YES")
+	) cp_pfsw (.probe(flp_int_sdw_dbg), .source(), .source_clk(clk_sys), .source_ena(1'b1));
+`endif
 
 	// diskEject is set by macos on eject
 	always @(posedge clk_sys) begin

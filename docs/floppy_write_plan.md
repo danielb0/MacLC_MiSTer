@@ -564,6 +564,16 @@ Port `rtl/floppy_sd_writer.v`. Add the DC42 offset (§6.2). Gate `sd_wr` with a
 `write_ok` backstop as well as the decoder's own condition — belt and braces,
 per `../UK101_MiSTer/UK101.sv:304`.
 
+**Status 2026-09-16:** code complete for raw AND DC42 (`9195c0a` + the review
+fixes described in §6.2). Raw images HARDWARE-GATED, both halves. DC42 not yet
+fitted. `verilator/tb_floppy_sd_writer.v` covers the byte order, the queue, the
+ack-timeout re-presentation, the DC42 RMW and checksum rewrite, the partial-
+tail refusal, and (sections 10-14) the remount abort and the flush trigger.
+The writer exports a 32-bit witness word (`PFSW` in the observer deck): the
+DC42 hardware gate should include a sustained large-file copy and read back a
+ZERO overflow count, since four SD transactions per sector against the ~10 ms
+sector cadence is the one capacity assumption nothing offline can test.
+
 **Gate (hardware + host):** write, eject, remount → the change persists. Then
 verify on the PC: the image opens in an emulator, and a byte-level diff against
 the pre-write copy shows *only* the intended sectors changed. **The diff is the
@@ -690,37 +700,64 @@ classes of fault; stage 2 needs both.
            for an 800K image — cheap, and it happens once per session);
        (c) zero the fields.
 
-  ★ **DECIDED 2026-09-16 — option (b), AND THE COST MODEL IN ITEMS 3-4 ABOVE
-     IS WRONG.** The owner chose in-container RMW with the header checksums
-     recomputed on eject. Items 3-4 priced that assuming the read half of the
-     read-modify-write comes from the SD CARD. It does not, and that deletes
-     most of the work:
+  ★ **DECIDED 2026-09-16 — option (b): in-container read-modify-write, with
+     the header's DATA checksum recomputed on the guest's eject.** Owner's
+     choice, taken in that session. Implemented in `rtl/floppy_sd_writer.v`
+     (commit `9195c0a`, reviewed and corrected the same day — see below).
 
-     **SDRAM already holds the whole payload, and it is authoritative.**
-     `floppy_loader.v:23` strips the 84-byte header while streaming, and
-     `size <= img_size_l - 84` — so everything after the header, sector data
-     AND the tag section, is in SDRAM. File block N is exactly
-     `[last 84 bytes of sector N-1][first 428 bytes of sector N]`, and both
-     halves are already there. So each affected block is ASSEMBLED LOCALLY
-     from SDRAM and written out whole. Consequences:
-     - no `sd_rd` side on the writer, no card-fed block buffer, no read
-       arbitration with floppy_loader;
-     - the eject-time checksum pass is a local SDRAM scan, not the 819200-byte
-       card re-read item 4(b) assumed;
-     - a sector write rewrites 84 bytes belonging to the NEIGHBOURING sector,
-       which is safe precisely because the source is SDRAM: those bytes are
-       whatever the image currently holds, not a stale shadow.
-     What genuinely remains: two block writes per commit instead of one
-     (irrelevant — sectors arrive ~10ms apart), the torn-write window, a
-     one-block header rewrite on eject, and BLOCK 0, which is the one block
-     SDRAM cannot supply in full because its first 84 bytes are the stripped
-     header (the loader must therefore keep those 42 words and export them).
+     **The neighbour bytes come from the CARD, not from SDRAM.** An earlier
+     draft of this paragraph argued the opposite (SDRAM holds the whole
+     normalised payload, so assemble each block locally); the code does not
+     do that, and the reasons are the writer's LC addition 2:
+     - sourcing from SDRAM would make the writer a FIFTH requester on
+       `rtl/sdram.v`, the most invariant-laden file in the core (§6.3), for
+       the sake of one extra SD read per block against a sector rate of one
+       per ~10 ms;
+     - the card is the more CORRECT source. If the user turns Floppy Write
+       off and later on again, SDRAM has moved on but the file has not;
+       reading the neighbour bytes back from the very block about to be
+       rewritten means each write changes only the sector it was for, and
+       never smuggles in sectors the user chose not to persist.
+     So each DC42 sector is four SD transactions: read N, write N patched,
+     read N+1, write N+1 patched. The read side reuses `sd_rd`/`sd_buff_wr`
+     exactly as `floppy_loader.v` does, and the slot's `sd_lba`/`sd_rd`/
+     `sd_wr` are muxed between loader and writer in `MacLC.sv`.
 
-     ⚠ **The risk moved, it did not vanish.** The writer now needs an SDRAM
-     READ port, making it a new requester on `rtl/sdram.v`. That is the
-     risk-bearing part of this job, not the DC42 arithmetic: CLAUDE.md
-     requires `verilator/tb_icache_seam.v` normal AND negative control after
-     any sdram.v handshake edit.
+     **The checksum is recomputed by re-reading the file from the card** on
+     the guest's eject (the only moment the file is still mounted and the
+     guest has finished with it): pass 1 scans blocks 0..last-data-block
+     accumulating `sum = ror32(sum + word)` over the data section, pass 2
+     re-reads block 0 and writes it back with words 36/37 substituted. The
+     TAG checksum is left as read — the tag section is never written, so it
+     is still right. ~1600 reads for an 800K image, once per session.
+
+     **Documented limits:** the file's final PARTIAL block is refused (hps_io
+     writes whole blocks; a tagless DC42 therefore never persists the 84-byte
+     tail of its last sector — and, symmetrically, the loader never LOADS it,
+     an older gap now documented in both modules); an OSD-first unmount skips
+     the checksum rewrite, leaving a stale checksum over correct data.
+
+     ★ **REVIEW FINDING, 2026-09-16 — the ported remount interlock was a
+     corruption path here, fixed before any fit.** MacPlus's writer clears
+     the queue on `img_mounted` but leaves the FSM running, which is safe when
+     a sector is ONE request. Here a sector is four and the flush ~1600, and
+     the later steps are issued from states that never consult `valid`.
+     `sd_ack` is per SLOT, so once the loader starts streaming the new image
+     its acks walk the writer's FSM forward until it raises `sd_wr` against
+     the loader's LBA — the old sector, or the old header block with a
+     garbage checksum, written into the NEW image. Reproduced in Icarus in
+     both forms (mid-RMW and mid-scan) and pinned by bench sections 10-11.
+     Fix: the mount pulse now ABORTS the FSM (safe because Main is single-
+     threaded and finishes any captured transfer before it can send a mount),
+     and `MacLC.sv` masks the slot's `sd_wr` while the loader owns it. Two
+     smaller trigger defects fixed alongside: the flush was gated on the
+     toggle's CURRENT state (write, switch off, eject → stale checksum) and on
+     `dirty`, which is set when a block lands, not when a sector is queued
+     (eject racing the session's only write → no flush). Sections 12-14.
+     ⚠ **Lesson for stage 2 and for the MacPlus port-back (§10):** an
+     interlock inherited from a one-request design must be re-derived for a
+     multi-request one. "Theirs unchanged" is a claim about the text, not
+     about the invariant.
 
      ★ Why NOT (d), normalise-the-file, on reflection: it needs a forked Main
      for truncate, which would be a SECOND Main dependency after ethernet — a

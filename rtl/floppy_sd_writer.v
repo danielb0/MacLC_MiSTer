@@ -26,7 +26,9 @@
 // has no notion of "gap" -- the queue only ever fills on commit_done. It also
 // reacts to img_mounted (eject/remount of THIS slot): the queue is dropped so
 // a sector captured against the old image never lands, at the old image's
-// stale LBA, in whatever gets mounted next.
+// stale LBA, in whatever gets mounted next -- and, unlike MacPlus, the FSM is
+// ABORTED too. See LC addition 5 for why the inherited "leave pstate alone"
+// rule became a corruption path here.
 //
 // Backpressure: the CPU-facing write path can only produce a new commit_done
 // roughly once per sector's worth of 16us-paced IWM bytes (~700 encoded bytes
@@ -90,6 +92,17 @@
 // recomputing. For a TAGLESS DC42 (tagSize 0, 819284 bytes) the final data
 // sector's 84-byte tail lands in the partial block and is refused: that one
 // sector stays volatile. Documented limit, not a silent one.
+//   The read side has the matching gap, and it is older: floppy_loader.v
+// floors the block count (`img_size[40:9]`), so those same 84 bytes are never
+// LOADED either -- a tagless DC42's last sector has a stale tail in SDRAM
+// from the moment it mounts. Every 1440K DC42 is tagless. HFS never uses the
+// volume's last block (the alternate MDB is the one before it), which is why
+// nobody has noticed. If it is ever closed, note that Main mounts this slot
+// non-growable (menu.cpp passes no pre-allocation) and clamps a write at the
+// file's end (user_io.cpp, the `sd_image_cangrow` branch), so the tail block
+// COULD be written without padding the file -- at the cost of depending on
+// that Main behaviour.
+//
 // ★ LC ADDITION 4 -- the DC42 data checksum, rewritten on eject.
 // A DC42 header carries checksums over the data and tag sections, computed as
 // `sum = ror32(sum + big_endian_word)` across the whole section. Every word's
@@ -121,7 +134,42 @@
 // read it fine, but DiskCopy itself would flag it.
 //
 // `dirty` gates the whole thing, so a session that never wrote a sector never
-// rewrites a header.
+// rewrites a header. Two details of the trigger, both found in review
+// (2026-09-16) and both pinned by the bench:
+//   - the flush is latched on `dirty` OR a non-empty queue, because `dirty`
+//     is set when a block LANDS, not when a sector is queued. An eject that
+//     arrives while the session's only sector is still queued would otherwise
+//     find dirty low and skip the rewrite. Whether to actually scan is decided
+//     at P_IDLE, once the queue has drained and dirty is final;
+//   - write_ok is NOT part of the condition. `dirty` already proves the
+//     writes were permitted when they happened; gating the flush on the
+//     toggle's CURRENT state would let "write, switch Floppy Write off, eject"
+//     leave changed data under an unchanged checksum.
+//
+// ★ LC ADDITION 5 -- img_mounted ABORTS the FSM. This is the one place the
+// MacPlus port is deliberately NOT "theirs unchanged".
+// MacPlus clears the queue on a remount but leaves pstate alone, reasoning
+// that a request hps_io is already servicing should be allowed to finish and
+// that, with `valid` cleared, the FSM can issue nothing further. Both halves
+// were true there because a sector was ONE request. Here a DC42 sector is a
+// FOUR-request transaction (read N, write N, read N+1, write N+1) and the
+// eject flush is a ~1600-request one, and steps after the first are issued
+// from states that never look at `valid`. sd_ack is per SLOT, not per
+// requester, so once floppy_loader starts streaming the new image its acks
+// are indistinguishable from ours: the loader's first ack moves P_RD_ACK to
+// P_RD_DONE, which raises sd_wr -- and sd_wr is not something the loader's
+// ownership of sd_lba/sd_rd can mask. Reproduced in the bench (sections 10 and
+// 11): the old sector, or the old header block with a garbage checksum, is
+// written into the NEW image at whatever LBA the loader happens to be on.
+// Exactly the class this module exists to prevent.
+//
+// The abort is safe because Main is single-threaded: it finishes any transfer
+// it has captured before it can send a mount notification, so at the mount
+// pulse no request of ours is mid-transfer, and anything still presented has
+// not been seen. Dropping it loses nothing that the remount has not already
+// lost. The old image's header stays stale, which is already the documented
+// outcome of an OSD-first unmount (see LC addition 4). MacLC.sv additionally
+// masks the slot's sd_wr while the loader owns it, belt and braces.
 module floppy_sd_writer #(
 	parameter ACK_TIMEOUT_BITS = 24 // ~0.5s at clk_sys (~32MHz); sim overrides this narrower
 ) (
@@ -152,13 +200,28 @@ module floppy_sd_writer #(
 	output reg        sd_wr,
 	input             sd_ack,
 
-	input      [7:0]  sd_buff_addr, // HPS-driven shared address, both directions
+	input      [12:0] sd_buff_addr_i, // HPS-driven shared address, both
+	                                  // directions. AW=12 WIDE hps_io; [7:0]
+	                                  // is the word index within a 512 B block
 	input      [15:0] sd_buff_dout, // card -> here, valid with sd_buff_wr
 	input             sd_buff_wr,
 	output     [15:0] sd_buff_din,  // here -> card
 
-	output            busy
+	output            busy,
+
+	// Witness word for the debug observer (MacLC.sv, USE_DBG_OBSERVER). The
+	// hardware gate needs to SEE the two silent failure modes -- a queue
+	// overflow (third commit while both buffers are owned: the header's
+	// "not expected in practice" limit, now 4x more likely under DC42's four
+	// transactions per sector) and a refused sector -- because neither leaves
+	// any trace in the guest.
+	//   [31:24] overflow count (sat)   [23:16] refused count (sat)
+	//   [15:8]  blocks landed (wraps)  [7:4] flushes started (sat)
+	//   [3:0]   pstate
+	output     [31:0] dbg
 );
+
+	wire [7:0] sd_buff_addr = sd_buff_addr_i[7:0];
 
 	localparam SPILL_BASE = 8'd214;  // 256 - HDR_WORDS: the shadow word the
 	                                 // sector's spill into the next block starts at
@@ -311,6 +374,11 @@ module floppy_sd_writer #(
 
 	assign busy = (pstate != P_IDLE) || valid[0] || valid[1] || flush_pending;
 
+	// debug witness counters (see the dbg port)
+	reg [7:0] dbg_ovf, dbg_refused, dbg_landed;
+	reg [3:0] dbg_flushes;
+	assign dbg = {dbg_ovf, dbg_refused, dbg_landed, dbg_flushes, pstate};
+
 	always @(posedge clk) begin
 		if (reset) begin
 			pstate <= P_IDLE;
@@ -328,6 +396,10 @@ module floppy_sd_writer #(
 			scan_blk    <= 13'd0;
 			cksum       <= 32'd0;
 			data_size   <= 22'd0;
+			dbg_ovf     <= 8'd0;
+			dbg_refused <= 8'd0;
+			dbg_landed  <= 8'd0;
+			dbg_flushes <= 4'd0;
 		end else begin
 			// capture side: independent of pstate, always ready to accept the
 			// next commit (see header re: the depth-2 queue's limit).
@@ -335,12 +407,18 @@ module floppy_sd_writer #(
 				valid[tail]  <= 1'b1;
 				addr_q[tail] <= commit_addr;
 				tail         <= ~tail;
+				// a third commit while both buffers are still owned: the
+				// in-flight buffer is being overwritten. Count it.
+				if (valid[tail] && dbg_ovf != 8'hFF) dbg_ovf <= dbg_ovf + 8'd1;
 			end
 
-			// Only a DC42 that was actually written this mount needs its
-			// header rewritten; a read-only session must leave the file byte
-			// for byte alone.
-			if (flush_req && dc42 && dirty && write_ok) flush_pending <= 1'b1;
+			// Latch the guest's eject if anything was, or may yet be, written
+			// this mount. Whether a rewrite is actually needed is decided at
+			// P_IDLE from the final `dirty` (header, LC addition 4). A
+			// read-only session (dirty can never set) leaves the file byte for
+			// byte alone.
+			if (flush_req && dc42 && (dirty || valid[0] || valid[1]))
+				flush_pending <= 1'b1;
 
 			// ★ checksum accumulation, pass 1. This lives in the MAIN
 			// sequential block on purpose: cksum/data_size are also written by
@@ -363,24 +441,6 @@ module floppy_sd_writer #(
 				if (word_in_data) cksum <= {cksum_add[0], cksum_add[31:1]};
 			end
 
-			// Eject-race interlock: a fresh mount of THIS slot drops whatever
-			// is still queued (not yet started) - it was captured against the
-			// image that is now gone. Deliberately does NOT touch
-			// pstate/sd_rd/sd_wr/head: a request already mid-flight keeps
-			// running exactly as it would otherwise, since tearing down one
-			// hps_io may already be servicing is worse than letting one stale
-			// sector finish. Only `valid` gates entry into a NEW request, so
-			// clearing it here can only stop sectors that have not started.
-			// `tail` is rewound to `head` so the next capture cannot land in
-			// whichever buffer is still draining.
-			if (img_mounted) begin
-				valid <= 2'b00;
-				tail  <= head;
-				// the header we would have rewritten belongs to the image
-				// that is gone; the new one has not been written to yet.
-				dirty <= 1'b0;
-			end
-
 			case (pstate)
 			// ★ the eject flush outranks a queued sector: the guest has
 			// already stopped writing, and anything still queued was captured
@@ -388,13 +448,21 @@ module floppy_sd_writer #(
 			// path below - flush_req only latches here and fires once P_IDLE
 			// is reached with the queue empty.
 			P_IDLE: if (flush_pending && !valid[0] && !valid[1] && !loader_busy) begin
-				cksum       <= 32'd0;
-				data_size   <= 22'd0;
-				scan_blk    <= 13'd0;
-				scan_active <= 1'b1;
-				sd_lba      <= 32'd0;
-				sd_rd       <= 1'b1;
-				pstate      <= F_SCAN_RD;
+				if (dirty) begin
+					cksum       <= 32'd0;
+					data_size   <= 22'd0;
+					scan_blk    <= 13'd0;
+					scan_active <= 1'b1;
+					sd_lba      <= 32'd0;
+					sd_rd       <= 1'b1;
+					pstate      <= F_SCAN_RD;
+					if (dbg_flushes != 4'hF) dbg_flushes <= dbg_flushes + 4'd1;
+				end else begin
+					// latched on a queued sector that was then refused (or
+					// never landed): nothing of ours is in the file, so the
+					// stored checksum is still right. Leave the header alone.
+					flush_pending <= 1'b0;
+				end
 			end else if (valid[head] && !loader_busy) begin
 				if (!blk_ok) begin
 					// past the end of the file (or its last, partial block):
@@ -406,6 +474,7 @@ module floppy_sd_writer #(
 					valid[head] <= 1'b0;
 					head        <= ~head;
 					phase       <= 1'b0;
+					if (dbg_refused != 8'hFF) dbg_refused <= dbg_refused + 8'd1;
 				end else if (dc42) begin
 					// read the block first: its other 84 (or 428) bytes belong
 					// to a neighbouring sector and must survive untouched.
@@ -457,6 +526,7 @@ module floppy_sd_writer #(
 
 			P_WAIT_DONE: if (!sd_ack) begin
 				dirty <= 1'b1;           // something of ours is now in the file
+				dbg_landed <= dbg_landed + 8'd1;
 				if (dc42 && !phase) begin
 					// first of the sector's two blocks is down; go round again
 					// for the second. The queue entry stays owned until both
@@ -472,16 +542,17 @@ module floppy_sd_writer #(
 			end
 
 			// ── pass 1: scan the data section, accumulating the checksum ──
+			// The scan's reads have no ack timeout. sd_rd is a LEVEL that
+			// hps_io polls, and it is held until acked, so there is nothing
+			// to re-present (an earlier version had a timeout branch here
+			// that only re-asserted an already-high sd_rd: dead code). Main
+			// answers a read on an empty or errored slot with a blank block
+			// rather than silence, and a remount aborts the whole flush (LC
+			// addition 5), so no wedge remains for a timeout to escape.
 			F_SCAN_RD: if (sd_ack) begin
 				sd_rd  <= 1'b0;
 				pstate <= F_SCAN_END;
-			end else if (ackTimeout) begin
-				// re-present, same reasoning as the write side: the request
-				// is idempotent (same block, read-only), so retrying it can
-				// never be the thing that corrupts the file.
-				sd_rd  <= 1'b1;
-			end else
-				ackTimer <= ackTimer + 1'b1;
+			end
 
 			F_SCAN_END: if (!sd_ack) begin
 				if (scan_blk >= last_blk) begin
@@ -500,13 +571,10 @@ module floppy_sd_writer #(
 			end
 
 			// ── pass 2: block 0 back out with the two checksum words swapped in
-			F_HDR_RD: if (sd_ack) begin
+			F_HDR_RD: if (sd_ack) begin   // held level, no timeout: as F_SCAN_RD
 				sd_rd  <= 1'b0;
 				pstate <= F_HDR_END;
-			end else if (ackTimeout) begin
-				sd_rd  <= 1'b1;   // idempotent re-present, as above
-			end else
-				ackTimer <= ackTimer + 1'b1;
+			end
 
 			F_HDR_END: if (!sd_ack) begin
 				sd_wr  <= 1'b1;
@@ -531,9 +599,30 @@ module floppy_sd_writer #(
 			default: pstate <= P_IDLE;
 			endcase
 
-			if (pstate != P_WAIT_ACK && pstate != P_RD_ACK &&
-			    pstate != F_SCAN_RD  && pstate != F_HDR_RD && pstate != F_HDR_WR)
+			if (pstate != P_WAIT_ACK && pstate != P_RD_ACK && pstate != F_HDR_WR)
 				ackTimer <= 0;
+
+			// ★ Remount ABORT (LC addition 5). Placed AFTER the case so that
+			// it wins over anything the state machine decided this cycle.
+			// Drops the queue (a sector captured against the image that is
+			// now gone must never land in the one that replaces it), rewinds
+			// `tail` to `head` so the next capture cannot land in a buffer
+			// that was draining, forgets the flush (the header it would have
+			// rewritten belongs to the old image) and returns the FSM to idle
+			// with both request lines low. Safe by Main's serialisation: no
+			// request of ours can be mid-transfer at the mount pulse, so the
+			// only thing dropped is a request nobody has seen.
+			if (img_mounted) begin
+				valid         <= 2'b00;
+				tail          <= head;
+				dirty         <= 1'b0;
+				flush_pending <= 1'b0;
+				scan_active   <= 1'b0;
+				phase         <= 1'b0;
+				sd_rd         <= 1'b0;
+				sd_wr         <= 1'b0;
+				pstate        <= P_IDLE;
+			end
 		end
 	end
 

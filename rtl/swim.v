@@ -87,9 +87,10 @@ module swim
 	output [15:0] wrSdBufData,
 	output        wrSdBufWr,
 	input [1:0] writeProtect, // 1 = this drive refuses writes: the OSD write
-	                        // enable is off, the slot mounted read-only, or it
-	                        // mounted a DC42 (plan section 6.2 -- a DC42 write
-	                        // is structurally a two-block RMW). Drives WRTPRT.
+	                        // enable is off or the slot mounted read-only.
+	                        // The container is NOT a term -- DC42 is writable
+	                        // (MacLC.sv flp_int_wp; the writer does the
+	                        // two-block RMW). Drives WRTPRT.
 	input [1:0] diskHD,     // disk is 1.44MB HD: {ext,int}
 
 	output [1:0] diskMotor,

@@ -24,6 +24,19 @@
  * sector of unrelated data at a valid offset. The bench therefore checks that
  * after a timeout the SAME lba and the SAME payload are presented again.
  *
+ * ★ A REMOUNT MUST ABORT THE FSM, NOT JUST THE QUEUE (sections 10-11). The
+ * MacPlus interlock only clears `valid` and lets the FSM run on, which is safe
+ * when a sector is one request. A DC42 sector is four and the eject flush is
+ * ~1600, and sd_ack is shared per slot: the LOADER's acks for the new image
+ * walk the old FSM forward until it raises sd_wr against the loader's LBA. The
+ * first version of this module did exactly that (found in review 2026-09-16,
+ * reproduced in Icarus); these two sections are the pin.
+ *
+ * Sections 12-14 pin the flush trigger: the eject must rewrite the checksum
+ * even if Floppy Write was switched off after the writes, and even if the
+ * session's only sector was still queued when the eject arrived; and it must
+ * NOT rewrite when nothing of ours ever reached the file.
+ *
  * ACK_TIMEOUT_BITS is overridden to 6 so the timeout is reachable in
  * simulation; the shipping default (24) is ~0.5s at clk_sys.
  *
@@ -61,6 +74,7 @@ module tb_floppy_sd_writer;
    reg         sd_buff_wr   = 1'b0;
    wire [15:0] sd_buff_din;
    wire        busy;
+   wire [31:0] dbg;
 
    floppy_sd_writer #(.ACK_TIMEOUT_BITS(6)) dut
    (
@@ -72,10 +86,11 @@ module tb_floppy_sd_writer;
       .write_ok(write_ok), .loader_busy(loader_busy),
       .dc42(dc42), .flush_req(flush_req), .file_blocks(file_blocks),
       .sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(sd_ack),
-      .sd_buff_addr(sd_buff_addr),
+      .sd_buff_addr_i({5'd0, sd_buff_addr}),
       .sd_buff_dout(sd_buff_dout), .sd_buff_wr(sd_buff_wr),
       .sd_buff_din(sd_buff_din),
-      .busy(busy)
+      .busy(busy),
+      .dbg(dbg)
    );
 
    integer checks = 0;
@@ -460,6 +475,125 @@ module tb_floppy_sd_writer;
       exp_cksum  = cksum_hold;
       wait_wr(200, got);  check(got && sd_lba === 32'd0, "and block 0 written back");
       check_header(16'h5000);
+      check(!busy, "flush complete");
+
+      // --- 10. a remount in the middle of a DC42 RMW aborts it -------------
+      $display("10. img_mounted mid-RMW: the loader's ack must not become our sd_wr");
+      load_sector(16'h0B00);
+      pulse_commit(22'd512 * 22'd6);
+      wait_rd(64, got);   check(got && sd_lba === 32'd6, "the RMW read is presented");
+      @(posedge clk); img_mounted <= 1'b1; loader_busy <= 1'b1;
+      @(posedge clk); img_mounted <= 1'b0;
+      @(posedge clk);
+      check(!sd_rd && !sd_wr, "both request lines drop at the mount pulse");
+      check(!busy, "and the writer is idle, queue and phase dropped");
+      // the loader now streams the new image; its first block is acked on
+      // the shared slot. The old FSM turned this into P_RD_DONE -> sd_wr.
+      serve_read(16'h2C00);
+      wait_wr(32, got);   check(!got, "no sd_wr may follow the loader's ack");
+      check(!busy, "still idle");
+      loader_busy <= 1'b0;
+
+      // --- 11. a remount during the eject flush abandons the scan -----------
+      $display("11. img_mounted mid-flush: the scan is abandoned, no header write");
+      load_sector(16'h0C00);
+      pulse_commit(22'd512 * 22'd8);
+      wait_rd(64, got);   serve_read(16'h1300);
+      wait_wr(64, got);   serve_block_dc42(16'h1300, 16'h0C00, 1'b1);
+      wait_rd(64, got);   serve_read(16'h1400);
+      wait_wr(64, got);   serve_block_dc42(16'h1400, 16'h0C00, 1'b0);
+      check(!busy, "sector landed, mount is dirty");
+      @(posedge clk); flush_req <= 1'b1;
+      @(posedge clk); flush_req <= 1'b0;
+      wait_rd(64, got);   check(got && sd_lba === 32'd0, "scan starts");
+      exp_cksum = 32'd0;
+      scan_block(13'd0, 16'h5000);
+      wait_rd(64, got);   check(got && sd_lba === 32'd1, "second scan block requested");
+      @(posedge clk); img_mounted <= 1'b1; loader_busy <= 1'b1;
+      @(posedge clk); img_mounted <= 1'b0;
+      @(posedge clk);
+      check(!busy && !sd_rd && !sd_wr, "the flush is abandoned at the mount pulse");
+      // enough loader acks to have walked the old FSM through the rest of
+      // the scan, the header re-read and into F_HDR_WR
+      for (i = 0; i < 6; i = i + 1) serve_read(16'h2D00 + i[15:0]);
+      wait_wr(32, got);   check(!got, "no header write may reach the new image");
+      check(!busy, "idle throughout");
+      loader_busy <= 1'b0;
+
+      // --- 12. Floppy Write switched off AFTER writing: eject still flushes -
+      $display("12. write_ok low at eject: the checksum is still rewritten");
+      load_sector(16'h0D00);
+      pulse_commit(22'd512 * 22'd10);
+      wait_rd(64, got);   serve_read(16'h1500);
+      wait_wr(64, got);   serve_block_dc42(16'h1500, 16'h0D00, 1'b1);
+      wait_rd(64, got);   serve_read(16'h1600);
+      wait_wr(64, got);   serve_block_dc42(16'h1600, 16'h0D00, 1'b0);
+      check(!busy, "sector landed");
+      write_ok <= 1'b0;
+      @(posedge clk); flush_req <= 1'b1;
+      @(posedge clk); flush_req <= 1'b0;
+      @(posedge clk);
+      check(busy, "the flush latches although write_ok is now low");
+      wait_rd(64, got);   check(got && sd_lba === 32'd0, "scan starts");
+      exp_cksum = 32'd0;
+      scan_block(13'd0, 16'h5100);
+      wait_rd(64, got);   scan_block(13'd1, 16'h6100);
+      wait_rd(64, got);   scan_block(13'd2, 16'h7100);
+      wait_rd(64, got);   check(got && sd_lba === 32'd0, "block 0 re-read");
+      cksum_hold = exp_cksum;
+      scan_block(13'd0, 16'h5100);
+      exp_cksum  = cksum_hold;
+      wait_wr(200, got);  check(got && sd_lba === 32'd0, "header written");
+      check_header(16'h5100);
+      check(!busy, "flush complete");
+      write_ok <= 1'b1;
+
+      // --- 13. eject while the session's only sector is still QUEUED --------
+      $display("13. eject with the only sector still queued: sector first, then the flush");
+      loader_busy <= 1'b1;                 // hold it in the queue
+      load_sector(16'h0E00);
+      pulse_commit(22'd512 * 22'd12);
+      // The point of this section is an eject that finds `dirty` LOW with a
+      // sector queued. Pin the precondition: on the pre-fix RTL, section 12's
+      // skipped flush left dirty set and this section passed for the wrong
+      // reason (negative control, 2026-09-16).
+      check(dut.dirty === 1'b0, "precondition: nothing has landed yet this mount");
+      @(posedge clk); flush_req <= 1'b1;   // dirty is still 0 here
+      @(posedge clk); flush_req <= 1'b0;
+      loader_busy <= 1'b0;
+      wait_rd(64, got);   check(got && sd_lba === 32'd12, "the queued sector drains first");
+      serve_read(16'h1700);
+      wait_wr(64, got);   serve_block_dc42(16'h1700, 16'h0E00, 1'b1);
+      wait_rd(64, got);   serve_read(16'h1800);
+      wait_wr(64, got);   serve_block_dc42(16'h1800, 16'h0E00, 1'b0);
+      wait_rd(64, got);   check(got && sd_lba === 32'd0, "then the scan starts: the flush latched on the queued sector");
+      exp_cksum = 32'd0;
+      scan_block(13'd0, 16'h5200);
+      wait_rd(64, got);   scan_block(13'd1, 16'h6200);
+      wait_rd(64, got);   scan_block(13'd2, 16'h7200);
+      wait_rd(64, got);   check(got && sd_lba === 32'd0, "block 0 re-read");
+      cksum_hold = exp_cksum;
+      scan_block(13'd0, 16'h5200);
+      exp_cksum  = cksum_hold;
+      wait_wr(200, got);  check(got && sd_lba === 32'd0, "header written");
+      check_header(16'h5200);
+      check(!busy, "flush complete");
+
+      // --- 14. eject after a sector that was REFUSED: nothing to rewrite ----
+      $display("14. eject when nothing of ours reached the file: header left alone");
+      loader_busy <= 1'b1;
+      load_sector(16'h0F00);
+      pulse_commit(22'd512 * 22'd63);      // needs blocks 63 AND 64; file_blocks is 64
+      @(posedge clk); flush_req <= 1'b1;
+      @(posedge clk); flush_req <= 1'b0;
+      loader_busy <= 1'b0;
+      wait_rd(32, got);   check(!got, "nothing is read");
+      wait_wr(32, got);   check(!got, "nothing is written");
+      check(!busy, "the latched flush is dropped once the queue proves clean");
+      // the witness word: refusals in sections 3, 8 and 14; never an overflow
+      check(dbg[23:16] === 8'd3, "dbg refused count = 3");
+      check(dbg[31:24] === 8'd0, "dbg overflow count = 0");
+      check(dbg[3:0] === 4'd0,   "dbg pstate = idle");
 
       $display("");
       $display("tb_floppy_sd_writer: %0d checks, %0d failures", checks, fails);

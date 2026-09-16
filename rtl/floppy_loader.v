@@ -164,8 +164,19 @@ module floppy_loader
 					dc42_name_ok <= 1'b0;
 					dc42_fmt     <= 8'd0;
 					raw_img      <= 1'b0;
+					is_dc42      <= 1'b0;   // an unmount must not leave the old
+					                        // container flag standing
 					size         <= 64'd0;
 					if (img_size != 64'd0) begin
+						// COMPLETE blocks only. A DC42 file is 84 + payload
+						// bytes and never ends on a block boundary, so its
+						// final partial block is never streamed: a tagged
+						// image loses nothing (that block is tag section), a
+						// TAGLESS one -- every 1440K DC42 -- never loads the
+						// last 84 bytes of its last sector. HFS leaves the
+						// volume's last block unused, so this is latent; it
+						// is documented with the matching write-side limit
+						// in floppy_sd_writer.v (LC addition 3).
 						sec_total <= img_size[40:9];   // / 512
 						sd_lba    <= 32'd0;
 						file_word <= 24'd0;
