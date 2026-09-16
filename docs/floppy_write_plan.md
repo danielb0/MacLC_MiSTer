@@ -1,7 +1,8 @@
 # Plan: Diskette Write Support for MacLC_MiSTer
 
-Scoped 2026-09-07; staging rationale revised 2026-09-14 (§1). No code
-written yet.
+Scoped 2026-09-07; staging rationale revised 2026-09-14 (§1). Stage 1 (GCR)
+is code complete and hardware-gated through Phase 4b as of 2026-09-16; stage 2
+(MFM) has not started.
 
 Prior art, all local and all ours:
 
