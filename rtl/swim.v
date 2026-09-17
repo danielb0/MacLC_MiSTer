@@ -103,6 +103,15 @@ module swim
 	input dskReadAckExt,
 	input [7:0] dskReadData,
 
+	// --- ISM MFM write engine (plan stage 2) ---------------------------
+	// One decoded byte per medium byte-time, exactly the stream
+	// rtl/mfm_write_decoder.v parses. mfm_wr_mark marks the A1 sync bytes.
+	// Inert unless (mode & 0x18) == 0x18 with an MFM write datapath.
+	output    [7:0] mfm_wr_byte,
+	output          mfm_wr_mark,
+	output          mfm_wr_stb,     // 1 clk, coincident with the byte-time tick
+	output           mfm_wr_active, // the engine owns the head
+
 	// --- diagnostic passthroughs (PFLP probes; internal drive only) ---
 	output [31:0] dbg_ism_flpe,  // {5'b0, ism_error, arm_cnt, ovr_cnt, unr_cnt} — JTAG FLPE
 	output [15:0] dbg_flp_byte_cnt,
@@ -454,6 +463,42 @@ module swim
 	// MFM delivery additionally requires the MFM read datapath (Setup bit2=0
 	// selects MFM vs GCR on the READ side — swim1.cpp:377).
 	wire ism_read_active = ism_arm && !ism_setup[2];
+
+	// ── ISM WRITE, the mirror of the above ─────────────────────────────
+	// swim1.cpp ism_write(): write mode is entered when (mode & 0x18) becomes
+	// 0x18 — ACTION *and* WRITE, not WRITE alone — and left when it stops being
+	// 0x18. Setup bit6 is the WRITE-side datapath select (TSM/GCR), the twin
+	// of bit2 on the read side, so an MFM write needs it CLEAR; a GCR write
+	// would be a different engine and is not stage 2.
+	wire ism_write_arm    = ism_mode && ism_mode_reg[3] && ism_mode_reg[4];
+	wire ism_write_active = ism_write_arm && !ism_setup[6];
+	assign mfm_wr_active  = ism_write_active;
+
+	// The medium's byte cadence. Deliberately the SAME tick the read path is
+	// paced by (floppy.v's mfm_timer, 129/259 cep periods = 16/32 us), not a
+	// second timer: the disk turns at one rate whichever direction the data
+	// is going, and one source cannot drift against itself. It keeps ticking
+	// in write mode because floppy.v gates it on spinning, not on read.
+	// mfm_stb is a LEVEL one cep period wide (MEASURED: 4 clk cycles, at
+	// clk8_en_p = busPhase==3), not a 1-clk pulse, so the byte-time tick
+	// edge-detects it. Driving the engine from the level would run it four
+	// times per byte time and write every byte four times over.
+	reg  ism_wr_stb_d;
+	always @(posedge clk) ism_wr_stb_d <= mfm_stb_sel;
+	wire ism_wr_tick = ism_write_active && mfm_stb_sel && !ism_wr_stb_d;
+
+	wire        ism_wr_pop;
+	wire        ism_wr_underrun;
+	ism_write_engine ism_wr (
+		.clk(clk), .rst(~_reset),
+		.active(ism_write_active),
+		.tick(ism_wr_tick),
+		.q_word(ism_fifo[0]),
+		.q_empty(ism_fifo_pos == 2'd0),
+		.q_pop(ism_wr_pop),
+		.o_byte(mfm_wr_byte), .o_mark(mfm_wr_mark), .o_stb(mfm_wr_stb),
+		.underrun(ism_wr_underrun)
+	);
 
 	always @(posedge clk) begin
 		dbg_err_d <= ism_error;
@@ -930,6 +975,14 @@ module swim
 				if (!ism_mode && cpuAddrRegHi != 4'hF) iwm_to_ism_counter <= 0;
 			end
 
+			// the engine's underrun: error b0 (MAME's write-side code, and
+			// only if nothing is pending already - `&& !m_ism_error`) and
+			// ACTION off, so the write stops itself as the hardware does
+			if (ism_wr_underrun) begin
+				if (ism_error == 8'd0) ism_error[0] <= 1'b1;
+				ism_mode_reg[3] <= 1'b0;
+			end
+
 			// ============================================================
 			// ISM FIFO transactions. Generator deliveries land in the
 			// staging ring; the drain refills the 2-entry CPU FIFO on
@@ -958,6 +1011,11 @@ module swim
 				ism_fifo_pos <= ism_fifo_pos + 2'd1;
 				ism_stage_rd <= ism_stage_rd + 4'd1;
 			end
+			// FIFO movement. The engine pop and a CPU push can land on the
+			// same cycle - the guest refills against Handshake b7 while the
+			// head keeps turning - so they are resolved TOGETHER rather than
+			// as an if/else. Getting that wrong loses the pushed byte and
+			// reports a spurious overrun, which on a write is a torn sector.
 			if (ism_pop_req) begin
 				if (ism_fifo_pos != 0) begin
 					ism_fifo[0]  <= ism_fifo[1];
@@ -965,6 +1023,16 @@ module swim
 					if (acc_addr_l[2:0] == 3'h0 && ism_fifo[0][FIFO_B_MARK]) ism_error[1] <= 1'b1;
 				end else
 					ism_error[2] <= 1'b1;          // underrun
+			end
+			else if (ism_wr_pop && ism_cpu_push) begin
+				// one out, one in: the survivor shifts down and the new word
+				// lands behind it, so the level is unchanged
+				ism_fifo[0] <= ism_fifo[1];
+				ism_fifo[ism_fifo_pos - 2'd1] <= ism_cpu_word;
+			end
+			else if (ism_wr_pop) begin
+				ism_fifo[0]  <= ism_fifo[1];
+				ism_fifo_pos <= ism_fifo_pos - 2'd1;
 			end
 			else if (ism_cpu_push) begin
 				if (ism_fifo_pos < 2'd2) begin

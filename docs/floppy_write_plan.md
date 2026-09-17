@@ -1017,13 +1017,56 @@ address-mark cases. All eleven are killed now. A bench that passes first time
 against its own author's RTL has proved nothing until something has been broken
 under it.
 
-**Still ahead, and neither is started:** the ISM write engine (`rtl/swim.v:376`
-still gates `ism_arm` with WRITE off, so Mode b4 is a no-op) and the
-identity-bearing staging ring that produces `anchor_sector`. The ring is the
-Phase 3 carve-out that did NOT land: `floppy.v` delivers `mfm_byte`/`mfm_mark`/
-`mfm_stb` with no sector identity attached, and `swim.v`'s 16-deep
-`ism_stage` entry has bits 15:11 free — enough for a 5-bit sector number, which
-is all the anchor needs given track/side come from the drive.
+★ **PIECE 2 OF 3 LANDED 2026-09-17: the ISM write engine.**
+`rtl/ism_write_engine.v` + `verilator/tb_ism_write_engine.v` (**22 checks, 0
+failures**, 8 mutants all killed), instantiated in `swim.v` behind
+`ism_write_active`. Ported from MAME `swim1.cpp`'s `ism_sync()` write branch,
+reduced to BYTES — we model no flux layer, exactly as the read path does not,
+so MAME's Tss encoder and TIME0/TIME1 pacing have no counterpart and the byte
+cadence arrives as a `tick`.
+
+It is its OWN module rather than more lines in `swim.v`, which is 1200 lines of
+delicate read semantics; everything else in this path is a small module with
+its own bench, and driving the engine through `swim.v` would mean spinning a
+whole drive to test one state machine.
+
+Three MAME semantics that had to be read from the source, not guessed — the
+reference doc covers the register map and the handshake inversion but not what
+the engine DOES with the FIFO:
+- **One CRC token emits TWO bytes.** The guest pushes one token (reg 2); MAME
+  keeps the `M_CRC` flag in the shift register so the next byte-time emits
+  `crc >> 8` again, which by then holds the low half, because
+  `crc16(C, C>>8) == (C & 0xff) << 8`. One token, one pop, two bytes.
+- **A mark byte IS written.** It just does not feed the CRC, and it resets it
+  to `0xCDB4`. `mfm_write_decoder.v` seeds at every A1 and feeds only from the
+  address mark onward — the two must agree or every field we write fails its
+  own CRC, which is what bench section 4 (engine -> decoder round trip) exists
+  to catch.
+- **Write underrun is error `0x01`**, not the read side's `0x04`, and the
+  engine clears ACTION so the write stops itself. Guarded by MAME's
+  `&& !m_ism_error`, so only the first error latches; `swim.v` applies that
+  guard because it owns the error register. Nothing reaches the medium on a
+  starved tick — a torn field is refused on CRC, a field with one wrong byte
+  written into it is silent corruption.
+
+★ **The byte-time tick EDGE-DETECTS `mfm_stb`, and that is not cosmetic.**
+`floppy.v`'s `mfm_stb` is a LEVEL one cep period wide — its clear sits inside
+`if (cep)` — **measured at 4.00 clk cycles per delivery**
+(`scratch/mfm/tb_stbwidth.v`). Driving the engine from the level would write
+every byte four times over. ‼ The same measurement raises an UNRESOLVED
+question about the READ path, where `stage_push` is consumed at full clk rate
+from the same level; it is filed as its own task, not touched here, because
+reads demonstrably work and the likeliest answer is that the analysis is wrong.
+
+**Still ahead — PIECE 3, the identity-bearing staging ring** that produces
+`anchor_sector`, plus wiring the decoder and committer into `floppy.v`. The
+ring is the Phase 3 carve-out that did NOT land: `floppy.v` delivers
+`mfm_byte`/`mfm_mark`/`mfm_stb` with no sector identity attached, and
+`swim.v`'s 16-deep `ism_stage` entry has bits 15:11 free — enough for a 5-bit
+sector number, which is all the anchor needs given track/side come from the
+drive. §6.1's rule is that the anchor is captured ALONGSIDE the byte in the
+ring and taken from the entry the CPU pops, never read from the encoder's live
+position: the ring separates the two by up to 16 byte-times by design.
 
 
 Design starting point is §6.1, from UK101. **The anchoring design question is
