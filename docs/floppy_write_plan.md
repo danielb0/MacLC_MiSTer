@@ -1058,15 +1058,101 @@ question about the READ path, where `stage_push` is consumed at full clk rate
 from the same level; it is filed as its own task, not touched here, because
 reads demonstrably work and the likeliest answer is that the analysis is wrong.
 
-**Still ahead — PIECE 3, the identity-bearing staging ring** that produces
-`anchor_sector`, plus wiring the decoder and committer into `floppy.v`. The
-ring is the Phase 3 carve-out that did NOT land: `floppy.v` delivers
-`mfm_byte`/`mfm_mark`/`mfm_stb` with no sector identity attached, and
-`swim.v`'s 16-deep `ism_stage` entry has bits 15:11 free — enough for a 5-bit
-sector number, which is all the anchor needs given track/side come from the
-drive. §6.1's rule is that the anchor is captured ALONGSIDE the byte in the
-ring and taken from the entry the CPU pops, never read from the encoder's live
-position: the ring separates the two by up to 16 byte-times by design.
+★ **PIECE 3 LANDED 2026-09-17: the identity-bearing ring, and the wiring.**
+The chain is now continuous: `mfm_track_encoder.v` exports `osector` (1-based,
+as the ID field's R byte); `floppy.v` latches it as `mfm_sector` BESIDE the
+delivered byte; `swim.v` carries it in the staging ring's free bits `[15:11]`
+and latches `ism_anchor_sector` on the CPU's POP — the byte the driver actually
+has in its hand, never the live head. §6.1's rule, implemented where it
+belongs. A read-arm invalidates the anchor, because the sector it names belongs
+to a revolution that is over.
+
+`floppy.v` now runs TWO DECODERS INTO ONE COMMITTER, muxed on the medium. A
+drive is GCR or MFM, never both, and the Phase 3 format-neutral carve-out meant
+`floppy_write_committer.v` needed NO change to accept MFM sectors — it sees a
+22-bit byte offset and a 512-byte read port and never learns what encoded them.
+
+Gate: `verilator/tb_mfm_write_path.v` (**11 checks, 0 failures**), the whole
+path through `floppy.v` — anchor, decoder, committer — with all four mutants
+killed (osector off by one, anchor not latched with the byte, decoder fed the
+LIVE head, committer fed the GCR decoder). GCR regressions unchanged:
+`tb_floppy_commit` 17, `tb_floppy_track_decoder` 345, `tb_floppy_write` 55,
+`tb_floppy_sd_writer` 8005.
+
+★ **THE BENCH WAS WRONG THREE TIMES BEFORE IT WAS RIGHT, and every version
+passed.** Worth recording, because each failure is one this project will meet
+again:
+1. **Tautological.** It set `wr_anchor = delivered_sector`, so pinning
+   `mfm_sector` to a constant moved the expectation with the thing under test.
+   The tag is now audited against the ID fields in the DELIVERED STREAM itself
+   (`A1 A1 A1 FE C H R N`, parsed in the bench) — 9 fields, 0 mismatches.
+2. **Not actually testing its headline claim.** A write is ~8 byte-times; a
+   sector is 682. The head never moved, so "delivered" and "live" were
+   indistinguishable and a decoder wired to the wrong one passed. The bench now
+   WAITS for the head to leave the anchor's sector.
+3. **It hung instead of failing.** That wait was unbounded, so the very mutant
+   meant to catch a broken tag span forever. It is bounded now. A bench that
+   hangs on a defect reads as a slow run, not a result.
+
+★ **`dskReadAck` IS SAMPLED ON `cen`, NOT `cep`** (`floppy.v:386`). The bench
+pulsed it one clock after `cep`; the pulse was low again by the sampling edge,
+so no payload fetch ever completed and the drive delivered exactly **206
+bytes** — the 146-byte track preamble plus sector 1's ID field and gaps — then
+stalled forever on its first payload byte. If a floppy bench stops making
+progress, check `mfm_needs_data` and `mfm_fresh` in the DUT first.
+
+★ **`floppy.v`'s byte cadence is now a parameter** (`MFM_PERIOD_HD`/`_DD`,
+defaults 129/259 = the real 16us/32us; no synthesised instance overrides them,
+same technique as `floppy_sd_writer.v`'s `ACK_TIMEOUT_BITS`). At the real
+cadence one sector is ~352k clocks, so an Icarus bench that must watch the head
+cross a sector boundary cannot afford it; at 7 a sector is ~19k.
+
+★ **THE CPU-SIDE BENCH LANDED 2026-09-17: `verilator/tb_swim_ism_arm.v`**
+(**27 checks, 0 failures**). It drives the SWIM over the CPU bus the way the
+Sony driver does — the IWM→ISM switch (offset-0xF, bit6 pattern 1,0,1,1), the
+Mode SET/CLEAR registers, Handshake polling, FIFO pushes through regs 0/1/2 —
+and section 5 does the real sequence: read an ID field, arm, write a data
+field, and check it lands at the sector whose byte the CPU actually POPPED.
+
+**It found three RTL defects that none of the other three benches could reach,
+because all of them start downstream of the guest:**
+1. **The staging ring kept feeding the FIFO during a write.** `stage_drain`
+   had no read/write qualifier, so bytes staged during the read phase drained
+   into the CPU FIFO once the engine was armed and put **stale read data on the
+   medium** behind the guest's own bytes. Now gated on `!ism_write_arm`, and
+   the ring is emptied on the write-arm edge.
+2. **`ism_write_engine`'s `q_pop` was combinational, and it raced.** `q_pop`
+   moves the caller's FIFO level, which IS `q_empty`, which is a term of
+   `q_pop`. Not a true loop — there is a register in the ring — but whether the
+   block that acts on the pop sees it on the edge that produced it came down to
+   evaluation order, and in Icarus it lost: a sibling `always` block counted
+   **29,721 pops while the block that acts on them counted ZERO**, so the FIFO
+   never drained and one stale byte was re-emitted 29,689 times. `q_pop` is
+   REGISTERED now. The latency costs nothing (the next tick is a whole
+   byte-time away) and the handshake is unambiguous in any scheduler.
+3. **The write-arm edge cleared `ism_fifo_pos`**, throwing away exactly the
+   bytes the driver had PRIMED. The first tick underran, ACTION was cleared,
+   and the guest then polled Handshake b7 forever against an engine that had
+   already disarmed. The ring is emptied on that edge; the CPU FIFO is not.
+
+★ **A DRIVER MUST PRIME THE FIFO BEFORE SETTING WRITE.** An engine armed
+against an empty FIFO underruns on its very next byte-time and stops itself —
+correct behaviour, and the reason defect 3 above was fatal rather than
+cosmetic. The bench does what the driver does: clear the FIFO (Mode bit0),
+push two bytes, then set ACTION+WRITE together.
+
+★ **AND FOUR BUGS IN THE BENCH.** It primed while read deliveries were still
+flowing into the FIFO; it watched a STICKY error register the read phase had
+already tripped; it did not wait long enough for the committer (256 words
+through a 3-state-per-word fetch is ~1000 cycles after the last byte); and,
+worst, it **pushed blind when its poll gave up** — the byte it silently dropped
+was the CRC TOKEN, so the field went out with no CRC, the engine underran where
+the CRC belonged, and the decoder never completed a field: no reject, no
+commit, nothing to see. That give-up is a hard assertion now.
+
+**Still ahead for stage 2:** MFM FORMATTING (§1 — the decoder accepts in-stream
+ID fields already, so this is ISM sequencing, not new decoding), and the whole
+thing is UNPROVEN ON HARDWARE.
 
 
 Design starting point is §6.1, from UK101. **The anchoring design question is

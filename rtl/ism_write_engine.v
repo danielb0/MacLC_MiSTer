@@ -98,13 +98,29 @@ module ism_write_engine (
 	// `active` belongs HERE and not only on the caller's tick: swim.v does
 	// gate the tick, but a module that eats the guest's queue when it is not
 	// armed is wrong on its own terms, and the bench holds it to that.
-	assign q_pop = active && tick && !crc_2nd && !q_empty;
+	//
+	// ★ REGISTERED, NOT COMBINATIONAL, and that is load-bearing. As a `wire`
+	// this closes a same-cycle path through the caller: q_pop moves the
+	// caller's FIFO level, which is q_empty, which is a term of q_pop. There
+	// is a register in the ring so it is not a true combinational loop, but
+	// whether the caller's own always block sees the pop on the edge that
+	// produced it comes down to evaluation order - and in Icarus it did not:
+	// a sibling always block counted 29,721 pops while the block that acts on
+	// them counted ZERO, so the FIFO never drained and the engine re-emitted
+	// one stale byte 29,689 times. Registering it costs one cycle of latency
+	// the caller does not care about (the next tick is a whole byte-time away)
+	// and makes the handshake unambiguous in any scheduler.
+	reg q_pop_r;
+	assign q_pop = q_pop_r;
+	wire consume = active && tick && !crc_2nd && !q_empty;
 
 	always @(posedge clk) begin
 		o_stb    <= 1'b0;
 		underrun <= 1'b0;
+		q_pop_r  <= consume;      // one cycle behind the tick that caused it
 
 		if (rst) begin
+			q_pop_r <= 1'b0;
 			crc     <= CRC_SEED;
 			crc_2nd <= 1'b0;
 			o_byte  <= 8'h00;

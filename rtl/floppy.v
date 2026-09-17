@@ -73,7 +73,17 @@ module floppy
 	// drive-visible: with WRITE_SUPPORT=0 the drive still answers every
 	// register exactly as before, it simply cannot accept a byte -- which it
 	// could not anyway.
-	parameter WRITE_SUPPORT = 1
+	parameter WRITE_SUPPORT = 1,
+
+	// MFM byte cadence, in cep ticks: 129 = 16us (HD), 259 = 32us (DD) at
+	// 8.125 MHz. Parameterised ONLY so a bench can shrink a revolution from
+	// ~4.3 M clocks to something that runs in seconds -- one MFM sector is 682
+	// byte-times, so at the real cadence an Icarus bench that has to watch the
+	// head cross a sector boundary runs for a quarter of an hour. No
+	// synthesised instance overrides these; same technique as
+	// floppy_sd_writer.v's ACK_TIMEOUT_BITS.
+	parameter [8:0] MFM_PERIOD_HD = 9'd129,
+	parameter [8:0] MFM_PERIOD_DD = 9'd259
 )
 (
 	input clk,
@@ -108,7 +118,7 @@ module floppy
 	// The Phase 2 contract tuple, as a witness. The committer consumes it
 	// internally; these exist so the cone has a load and so a HUD can see it.
 	output        wrSecValid,
-	output [3:0]  wrSecNum,
+	output [4:0]  wrSecNum,
 	output [21:0] wrSecAddr,
 	// SDRAM write port for committed sectors (Phase 3b). Same LEVEL protocol as
 	// floppy_loader.v's. wrSdAddr is an image BYTE offset, matching dskReadAddr
@@ -157,6 +167,21 @@ module floppy
 	output reg       mfm_mark,   // delivered byte is an address-mark (A1)
 	output reg       mfm_crc0,   // delivered byte completes a valid CRC field
 	output reg       mfm_stb,    // 1-cep-period delivery strobe
+	// The sector whose field was passing under the head when THIS byte was
+	// delivered, 1-based - the write path's positional anchor (plan section
+	// 6.1). Latched with the byte, not sampled later: swim.v's staging ring
+	// puts up to 16 byte-times between a delivered byte and the live head.
+	output reg [4:0] mfm_sector,
+
+	// --- ISM MFM write stream, from swim.v's ism_write_engine -------------
+	input      [7:0] mfm_wr_byte,
+	input            mfm_wr_mark,
+	input            mfm_wr_stb,   // 1 clk per written byte
+	// The anchor swim.v recovered from the staging-ring entry the CPU last
+	// POPPED - i.e. the sector of the ID field the driver itself read before
+	// deciding to write here. Never the live head position (plan section 6.1).
+	input      [4:0] mfm_wr_anchor,
+	input            mfm_wr_anchor_ok,
 
 	// --- diagnostic ports (PFLP probes; safe to leave dangling when unused) ---
 	// Ported from lbmactwo_MiSTer ac44312 (the debug deck that root-caused its
@@ -394,6 +419,7 @@ module floppy
 	// position (driveTrack/driveSide) as the GCR path.
 	wire [7:0] mfm_odata;
 	wire       mfm_omark, mfm_ocrc0, mfm_needs_data, mfm_index;
+	wire [4:0] mfm_osector;
 	reg        mfm_ready_pulse;
 
 	mfm_track_encoder menc
@@ -408,6 +434,7 @@ module floppy
 		.idata  ( dskReadDataLatch ),
 		.odata  ( mfm_odata ),
 		.omark  ( mfm_omark ),
+		.osector( mfm_osector ),
 		.ocrc0  ( mfm_ocrc0 ),
 		.oneeds ( mfm_needs_data ),
 		.oindex ( mfm_index )
@@ -428,7 +455,12 @@ module floppy
 	// filled, Handshake b7 never set, and the driver saw an empty disk.
 	wire       mfm_spinning = mfm_disk && (motor || ism_sel) &&
 	                          ~driveRegs[`DRIVE_REG_CSTIN];
-	wire [8:0] mfm_period   = mfm_hd ? 9'd129 : 9'd259;
+	// Byte cadence in cep ticks: 129 = 16us (HD), 259 = 32us (DD) at 8.125MHz.
+	// Parameterised ONLY so a bench can shrink a revolution from ~4.3M clocks
+	// to something it can run in seconds; the defaults are the real medium and
+	// no synthesised instance overrides them. Same technique as
+	// floppy_sd_writer.v's ACK_TIMEOUT_BITS.
+	wire [8:0] mfm_period   = mfm_hd ? MFM_PERIOD_HD : MFM_PERIOD_DD;
 	reg  [8:0] mfm_timer;
 	reg        mfm_fresh;
 	reg        mfm_ack_skip;
@@ -441,6 +473,7 @@ module floppy
 			mfm_stb         <= 1'b0;
 			mfm_byte        <= 8'h00;
 			mfm_mark        <= 1'b0;
+			mfm_sector      <= 5'd1;
 			mfm_crc0        <= 1'b0;
 		end else begin
 			mfm_ready_pulse <= 1'b0;   // 1-clk advance pulse to the encoder
@@ -462,6 +495,7 @@ module floppy
 					mfm_byte        <= mfm_odata;
 					mfm_mark        <= mfm_omark;
 					mfm_crc0        <= mfm_ocrc0;
+					mfm_sector      <= mfm_osector;
 					mfm_stb         <= 1'b1;
 					mfm_ready_pulse <= 1'b1;
 					mfm_fresh       <= 1'b0;
@@ -889,10 +923,66 @@ module floppy
 		end
 	end
 
-	wire wrSecReject, wrSecAmark, wrSecFmtMark, wrSecFmtDs;
+	wire wrSecAmark, wrSecFmtMark, wrSecFmtDs;
 	wire [3:0] wrSecAmarkSector;
 	wire [8:0] wrBufAddr;          // driven by the committer below
-	wire [7:0] wrBufData;
+
+	// ── TWO DECODERS, ONE COMMITTER ───────────────────────────────
+	// A drive's medium is GCR or MFM, never both at once, so the two decoders
+	// are muxed into the single committer rather than duplicated. That the
+	// committer is format-neutral is the Phase 3 carve-out paying off: it sees
+	// a 22-bit image byte offset and a 512-byte read port and never learns
+	// which encoding produced them (plan section 1).
+	wire        gcrSecValid, mfmSecValid;
+	wire  [3:0] gcrSecNum;
+	wire  [4:0] mfmSecNum;
+	wire [21:0] gcrSecAddr,  mfmSecAddr;
+	wire  [7:0] gcrBufData,  mfmBufData;
+	wire        gcrSecReject, mfmSecReject;
+
+	wire        wrIsMfm   = mfm_disk;
+	wire        wrSecValidMux = wrIsMfm ? mfmSecValid : gcrSecValid;
+	wire [21:0] wrSecAddrMux  = wrIsMfm ? mfmSecAddr  : gcrSecAddr;
+	wire  [7:0] wrBufData     = wrIsMfm ? mfmBufData  : gcrBufData;
+
+	assign wrSecValid = wrSecValidMux;
+	assign wrSecAddr  = wrSecAddrMux;
+	assign wrSecNum   = wrIsMfm ? mfmSecNum : {1'b0, gcrSecNum};
+	wire        wrSecReject   = wrIsMfm ? mfmSecReject : gcrSecReject;
+
+	// ── the MFM write decoder (plan stage 2) ───────────────────────
+	// Fed by swim.v's ism_write_engine. `track`/`side` are the PHYSICAL head
+	// position and are what build the address; only the sector number comes
+	// from the stream's own ID field or, failing that, the anchor.
+	mfm_write_decoder mdec
+	(
+		.clk           ( clk ),
+		.rst           ( !_reset || writePathReset ),
+
+		.ready         ( mfm_wr_stb ),
+		.idata         ( mfm_wr_byte ),
+		.imark         ( mfm_wr_mark ),
+
+		.side          ( driveSide ),
+		.track         ( driveTrack ),
+		.hd            ( mfm_hd ),
+
+		.anchor_sector ( mfm_wr_anchor ),
+		.anchor_valid  ( mfm_wr_anchor_ok ),
+
+		.sector_valid  ( mfmSecValid ),
+		.sector        ( mfmSecNum ),
+		.addr          ( mfmSecAddr ),
+		.reject        ( mfmSecReject ),
+
+		.amark         (  ),
+		.amark_sector  (  ),
+		.amark_cyl     (  ),
+		.amark_head    (  ),
+
+		.buf_addr      ( wrBufAddr ),
+		.buf_data      ( mfmBufData )
+	);
 
 	floppy_track_decoder dec
 	(
@@ -906,17 +996,17 @@ module floppy
 
 		.idata        ( pendingWriteByte ),
 
-		.sector_valid ( wrSecValid ),
-		.sector       ( wrSecNum ),
-		.addr         ( wrSecAddr ),
-		.reject       ( wrSecReject ),
+		.sector_valid ( gcrSecValid ),
+		.sector       ( gcrSecNum ),
+		.addr         ( gcrSecAddr ),
+		.reject       ( gcrSecReject ),
 		.amark        ( wrSecAmark ),
 		.amark_sector ( wrSecAmarkSector ),
 		.fmt_mark     ( wrSecFmtMark ),
 		.fmt_ds       ( wrSecFmtDs ),
 
 		.buf_addr     ( wrBufAddr ),
-		.buf_data     ( wrBufData )
+		.buf_data     ( gcrBufData )
 	);
 
 	// Declared before the instance that reads them. Style, not a fix -- see the
@@ -934,8 +1024,8 @@ module floppy
 		.clk            ( clk ),
 		.rst            ( !_reset || writePathReset ),
 
-		.sector_valid   ( wrSecValid ),
-		.sector_addr    ( wrSecAddr ),
+		.sector_valid   ( wrSecValidMux ),
+		.sector_addr    ( wrSecAddrMux ),
 		.buf_addr       ( wrBufAddr ),
 		.buf_data       ( wrBufData ),
 
@@ -982,8 +1072,15 @@ module floppy
 	// one: each word must total exactly 32.
 	(* preserve, noprune *) reg [31:0] wr_anchor0, wr_anchor1, wr_anchor2;
 	always @(posedge clk) begin
-		//  8 + 8 + 4 + 1+1+1+1 + 1 + 7 = 32
-		wr_anchor0 <= {wr_sec_cnt, wr_rej_cnt, wrSecNum,
+		// ★ wrSecNum WIDENED 4 -> 5 for MFM (sectors 1..18; GCR needs only
+		// 0..11), so a bit had to come from somewhere or this word would be
+		// 33 bits and Quartus would drop the TOP one - silently corrupting
+		// wr_sec_cnt in the JTAG probe. The reject counter gives it up: it is
+		// a saturating-ish witness read for "is this nonzero and climbing",
+		// not an exact total, so 7 bits (0..127) says the same thing. Caught
+		// by Warning 10230 and by this block's own rule, one line above.
+		//  8 + 7 + 5 + 1+1+1+1 + 1 + 7 = 32
+		wr_anchor0 <= {wr_sec_cnt, wr_rej_cnt[6:0], wrSecNum,
 		               writeBusyReg, writeUnderrunReg, writeProtect, insertDisk,
 		               driveSide, driveTrack[6:0]};
 		//  2 + 1+1+1+1 + 4 + 22 = 32

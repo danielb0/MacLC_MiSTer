@@ -110,7 +110,7 @@ module swim
 	output    [7:0] mfm_wr_byte,
 	output          mfm_wr_mark,
 	output          mfm_wr_stb,     // 1 clk, coincident with the byte-time tick
-	output           mfm_wr_active, // the engine owns the head
+	output          mfm_wr_active,  // the engine owns the head
 
 	// --- diagnostic passthroughs (PFLP probes; internal drive only) ---
 	output [31:0] dbg_ism_flpe,  // {5'b0, ism_error, arm_cnt, ovr_cnt, unr_cnt} — JTAG FLPE
@@ -185,9 +185,26 @@ module swim
 	reg [3:0]  ism_stage_rd, ism_stage_wr;
 	reg [4:0]  ism_stage_cnt;
 	reg [1:0]  iwm_to_ism_counter; // Mode switch sequence detector
+	// The write path's positional anchor: the sector of the last entry the CPU
+	// POPPED out of the FIFO. Valid once anything has been read since the arm;
+	// a fresh read-arm invalidates it, because the sector it names belongs to a
+	// revolution that is over.
+	reg  [4:0] ism_anchor_sector;
+	reg        ism_anchor_ok;
+	reg        ism_write_arm_d;   // for the write-arm rising edge
 
 	// ISM FIFO entry layout: [7:0] data byte, [8] MARK (A1 sync), [9] CRC token
-	// (CPU write-side placeholder), [10] CRC0 (running CRC == 0 at this byte).
+	// (CPU write-side placeholder), [10] CRC0 (running CRC == 0 at this byte),
+	// [15:11] the SECTOR whose field that byte came from, 1-based.
+	//
+	// ★ THE SECTOR RIDES WITH THE BYTE, and that is the whole point (plan
+	// section 6.1). An MFM data field does not name its sector, so a write is
+	// placed by the ID field the driver last READ - and "last read" means the
+	// byte the CPU actually POPPED, not where the head is now. This ring is 16
+	// deep, so those two are up to 16 byte-times apart by design. UK101 hit the
+	// same bug one byte wide and it was fatal to its verify-reread; ours would
+	// be sixteen bytes wide. Bits 15:11 were free; track and side come from the
+	// drive, so five bits of sector number is the whole anchor.
 	localparam FIFO_B_MARK = 8;
 	localparam FIFO_B_CRC  = 9;
 	localparam FIFO_B_CRC0 = 10;
@@ -240,6 +257,7 @@ module swim
 	// MFM (ISM) read stream from each drive: byte+flags registered at each
 	// 16/32 us delivery, with a one-cep-period strobe (sampled here on cen).
 	wire [7:0] mfm_byte_int, mfm_byte_ext;
+	wire [4:0] mfm_sector_int, mfm_sector_ext;
 	wire mfm_mark_int, mfm_mark_ext, mfm_crc0_int, mfm_crc0_ext;
 	wire mfm_stb_int, mfm_stb_ext;
 
@@ -367,6 +385,13 @@ module swim
 		.mfm_disk(diskMFM[0]),
 		.mfm_hd(diskHD[0]),
 		.mfm_byte(mfm_byte_int),
+		.mfm_sector(mfm_sector_int),
+		.mfm_wr_byte(mfm_wr_byte),
+		.mfm_wr_mark(mfm_wr_mark),
+		// only this drive's own write engine may reach it
+		.mfm_wr_stb(mfm_wr_stb && !ism_devsel_ext),
+		.mfm_wr_anchor(ism_anchor_sector),
+		.mfm_wr_anchor_ok(ism_anchor_ok),
 		.mfm_mark(mfm_mark_int),
 		.mfm_crc0(mfm_crc0_int),
 		.mfm_stb(mfm_stb_int),
@@ -442,6 +467,13 @@ module swim
 		.mfm_disk(diskMFM[1]),
 		.mfm_hd(diskHD[1]),
 		.mfm_byte(mfm_byte_ext),
+		.mfm_sector(mfm_sector_ext),
+		// WRITE_SUPPORT(0) and never any media: the stream is tied off
+		.mfm_wr_byte(8'h00),
+		.mfm_wr_mark(1'b0),
+		.mfm_wr_stb(1'b0),
+		.mfm_wr_anchor(5'd1),
+		.mfm_wr_anchor_ok(1'b0),
 		.mfm_mark(mfm_mark_ext),
 		.mfm_crc0(mfm_crc0_ext),
 		.mfm_stb(mfm_stb_ext)
@@ -457,6 +489,7 @@ module swim
 	wire mfm_mark_sel = ism_devsel_ext ? mfm_mark_ext : mfm_mark_int;
 	wire mfm_crc0_sel = ism_devsel_ext ? mfm_crc0_ext : mfm_crc0_int;
 	wire mfm_stb_sel  = ism_devsel_ext ? mfm_stb_ext  : mfm_stb_int;
+	wire [4:0] mfm_sector_sel = ism_devsel_ext ? mfm_sector_ext : mfm_sector_int;
 	wire ism_sense    = ism_devsel_ext ? senseExt : senseInt;
 	// ISM read armed: (mode & 0x18) == 0x08 (ACTION on, WRITE off) — swim1.cpp.
 	wire ism_arm = ism_mode && ism_mode_reg[3] && !ism_mode_reg[4];
@@ -720,11 +753,22 @@ module swim
 	                     acc_addr_l[2:0] == 3'h2);
 	wire ism_gen_push = ism_read_active && mfm_stb_sel &&
 	                    (mfm_synced || mfm_mark_sel);
-	wire [15:0] ism_gen_word = {5'b0, mfm_crc0_sel, 1'b0, mfm_mark_sel, mfm_byte_sel};
+	wire [15:0] ism_gen_word = {mfm_sector_sel, mfm_crc0_sel, 1'b0, mfm_mark_sel, mfm_byte_sel};
 	// staging flow control: push on delivery (unless full), drain into the
 	// 2-entry FIFO on quiet cycles (CPU FIFO events only fire at acc_end)
 	wire stage_push  = ism_gen_push && (ism_stage_cnt != 5'd16);
-	wire stage_drain = (ism_stage_cnt != 5'd0) && (ism_fifo_pos < 2'd2) && !acc_end;
+	// ★ THE RING IS A READ-SIDE STRUCTURE AND MUST STOP AT THE WRITE ARM.
+	// Without the `!ism_write_arm` term, bytes still staged from the read
+	// phase keep refilling the CPU FIFO during a write: the engine then never
+	// sees an empty queue, never underruns, and streams STALE READ DATA onto
+	// the medium behind the bytes the guest pushed. Found by
+	// verilator/tb_swim_ism_arm.v section 5 - 29,801 bytes reached the medium
+	// for a 528-byte field, with zero underruns, and nothing committed.
+	// The ring is also emptied on the arm edge below, so nothing survives the
+	// transition; MAME has no ring at all (its FIFO is the whole buffer, and
+	// the driver clears it with Mode bit0), so this is ours to get right.
+	wire stage_drain = (ism_stage_cnt != 5'd0) && (ism_fifo_pos < 2'd2) &&
+	                   !acc_end && !ism_write_arm;
 	wire [15:0] ism_cpu_word = (acc_addr_l[2:0] == 3'h2) ? 16'h0200 :
 	                           (acc_addr_l[2:0] == 3'h1) ? {7'b0, 1'b1, acc_data_l} :
 	                                                       {8'b0, acc_data_l};
@@ -910,6 +954,9 @@ module swim
 			iwm_to_ism_counter <= 0;
 			ism_fifo[0] <= 0;
 			ism_fifo[1] <= 0;
+			ism_anchor_sector <= 5'd1;
+			ism_anchor_ok     <= 1'b0;
+			ism_write_arm_d   <= 1'b0;
 			// IWM bit registers (merged here to avoid multiple drivers)
 			ca0 <= 0;
 			ca1 <= 0;
@@ -1020,6 +1067,12 @@ module swim
 				if (ism_fifo_pos != 0) begin
 					ism_fifo[0]  <= ism_fifo[1];
 					ism_fifo_pos <= ism_fifo_pos - 2'd1;
+					// ★ THE ANCHOR, captured from the entry the guest is
+					// actually taking. Not the live head, not the ring's newest
+					// entry - the byte the driver has in its hand. See the FIFO
+					// layout comment above and plan section 6.1.
+					ism_anchor_sector <= ism_fifo[0][15:11];
+					ism_anchor_ok     <= 1'b1;
 					if (acc_addr_l[2:0] == 3'h0 && ism_fifo[0][FIFO_B_MARK]) ism_error[1] <= 1'b1;
 				end else
 					ism_error[2] <= 1'b1;          // underrun
@@ -1143,6 +1196,30 @@ module swim
 			// the mark hunt and empties the FIFO — the per-field re-arm the
 			// driver performs 18+ times per revolution.
 			ism_arm_d <= ism_arm;
+			// A read-arm restarts the shift register and the hunt, so anything
+			// the anchor named belongs to a revolution that is over.
+			if (ism_arm && !ism_arm_d) ism_anchor_ok <= 1'b0;
+			// Entering WRITE empties the STAGING RING: whatever it still holds
+			// was delivered by the head on the way past and has no business
+			// reaching the medium (see stage_drain).
+			//
+			// ★ THE CPU FIFO IS NOT TOUCHED, and that distinction is the whole
+			// point. The driver PRE-FILLS the FIFO and only then sets WRITE,
+			// because an engine armed against an empty FIFO underruns on its
+			// very next byte-time and stops the write. An earlier version of
+			// this cleared ism_fifo_pos here too and threw away exactly those
+			// primed bytes: the first tick underran, error 0x01, ACTION
+			// cleared, and the guest then polled Handshake b7 forever against
+			// an engine that had already disarmed. Caught by
+			// verilator/tb_swim_ism_arm.v section 5.
+			//
+			// The anchor also SURVIVES - it is what places the write.
+			ism_write_arm_d <= ism_write_arm;
+			if (ism_write_arm && !ism_write_arm_d) begin
+				ism_stage_rd  <= 4'd0;
+				ism_stage_wr  <= 4'd0;
+				ism_stage_cnt <= 5'd0;
+			end
 			if (ism_arm && !ism_arm_d) begin
 				mfm_synced   <= 1'b0;
 				ism_fifo_pos <= 0;
