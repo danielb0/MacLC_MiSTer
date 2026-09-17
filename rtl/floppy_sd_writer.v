@@ -163,12 +163,17 @@ module floppy_sd_writer #(
 	           F_SCAN_ADDR = 4'd11,  // flush: checksum scan over SDRAM
 	           F_SCAN_REQ  = 4'd12,
 	           F_SCAN_TURN = 4'd13,
-	           P_FILL_HWAIT = 4'd14; // header word: the loader's read port is
+	           P_FILL_HWAIT = 4'd14, // header word: the loader's read port is
 	                                 // registered, so hdr_data for the address
 	                                 // set in P_FILL_ADDR is valid TWO edges
 	                                 // later, not one (bench section 17 caught
 	                                 // the one-edge version: every header word
 	                                 // came out as its predecessor)
+	           P_SKIP      = 4'd15;  // refused entry: one cycle for q_head to
+	                                 // catch up with rd_ptr. Numbered last on
+	                                 // purpose - the earlier codes are what the
+	                                 // PFSW witness words captured in
+	                                 // docs/floppy_write_plan.md decode to.
 	reg [3:0] pstate;
 
 	reg [12:0] cur_sec;      // sector being written (its FIRST block index)
@@ -265,6 +270,13 @@ module floppy_sd_writer #(
 						// that can refuse; nothing upstream checks the block
 						// against the mounted file's length.
 						if (dbg_refused != 8'hFF) dbg_refused <= dbg_refused + 8'd1;
+						// ...but leave P_IDLE for a cycle. q_head is a
+						// registered read of q_mem[rd_ptr], so it still shows
+						// the entry just retired; staying here would pop a
+						// SECOND entry against that stale head - refusing the
+						// same sector twice and silently dropping the one
+						// behind it (bench section 3).
+						pstate <= P_SKIP;
 					end else begin
 						cur_sec <= q_head;
 						phase   <= 1'b0;
@@ -274,6 +286,8 @@ module floppy_sd_writer #(
 					end
 				end
 			end
+
+			P_SKIP: pstate <= P_IDLE;   // q_head catches up with rd_ptr here
 
 			// ── fill the block buffer, one word per two-phase handshake ──
 			P_FILL_ADDR: begin

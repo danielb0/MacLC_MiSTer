@@ -24,6 +24,14 @@
  * sd_lba in one poll and acks in a later one, so a retired block plus a late
  * ack would stream whatever is in the buffer to the captured LBA.
  *
+ * ★ A REFUSAL MUST RETIRE EXACTLY ONE ENTRY (section 3). `q_head` is a
+ * registered read of `q_mem[rd_ptr]` and lags a pop by a cycle; the refuse
+ * path is the only one that stays in P_IDLE across it, so before the P_SKIP
+ * state it popped again against the stale head - refusing one sector twice
+ * and losing the NEXT one, unwritten and uncounted. A single queued entry
+ * has nothing behind it to lose, which is why the one-commit case passed
+ * either way; the section queues three.
+ *
  * ★ A REMOUNT MUST ABORT THE FSM (sections 10-11). sd_ack is per slot: the
  * loader's acks for the new image would otherwise walk a running FSM into an
  * sd_wr against the loader's LBA. Found in the Phase 4 review, kept here.
@@ -281,6 +289,33 @@ module tb_floppy_sd_writer;
       check(!got, "an out-of-range block must not be written");
       check(!busy, "and must be retired rather than left queued");
       check(dbg[23:16] === 8'd1, "the refusal is counted");
+
+      // ...and the refusal must retire exactly ONE entry. q_head is a
+      // registered read of q_mem[rd_ptr], so for a cycle after the pop it
+      // still shows the entry just refused; a refuse path that stayed in
+      // P_IDLE would pop again against that stale head - refusing the same
+      // sector twice and dropping the sector behind it, unwritten and
+      // uncounted. One entry has nothing behind it to lose, which is why
+      // the single-commit case above passes either way: queue THREE.
+      $display("   ...and the two sectors queued behind it still land, in order");
+      loader_busy <= 1'b1;
+      fill_sector(13'd25, 16'h6100);
+      fill_sector(13'd26, 16'h6200);
+      pulse_commit(13'd1601);              // past file_blocks: refused
+      pulse_commit(13'd25);
+      pulse_commit(13'd26);
+      repeat (4) @(posedge clk);
+      loader_busy <= 1'b0;
+      wait_wr(4000, got);
+      check(got && sd_lba === 32'd25, "the sector behind a refusal is written, at its own LBA");
+      serve_block(13'd25, 1'b0, 32'd0);
+      wait_wr(4000, got);
+      check(got && sd_lba === 32'd26, "and the one behind THAT is not swallowed by the refusal");
+      serve_block(13'd26, 1'b0, 32'd0);
+      check(!busy, "the queue drains completely");
+      check(dbg[23:16] === 8'd2, "one further refusal counted, not two");
+      check(dbg[15:8] === 8'd3, "three blocks have now landed, none lost");
+      check(bad_addr == 0, "every SDRAM address was inside the image");
 
       // ─── 4. a remount drops what was queued against the old image ──────
       $display("4. img_mounted drops the queued sector");

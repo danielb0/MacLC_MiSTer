@@ -695,6 +695,20 @@ sector reaches the core (PFSW showed no 400K writes). 400K HFS volumes are
 technically possible but not what anyone has, so the offline proof above is
 where 400K support stops. No hardware run is required for the PR.
 
+★ **WRITER DEFECT, found on the MacPlus port and fixed here 2026-09-17 —
+the refuse path popped TWICE and lost the sector behind it.** `q_head` is a
+registered read of `q_mem[rd_ptr]`, so for one cycle after a pop it still
+shows the entry just retired. The out-of-range refusal was the only path
+that stayed in `P_IDLE` across that cycle, so it popped again against the
+stale head: queue `[X(out of range), Y, Z]` refused X twice, wrote Y, and
+dropped **Z unwritten and uncounted** — `dbg[23:16]` blamed the refusal for
+it. MacPlus hit this porting the SDRAM-sourced design back (`6f58059`) and
+added a one-cycle `P_SKIP`; the same state is now `4'd15` here (numbered
+last so the `PFSW` words captured above still decode). Bench section 3 only
+ever queued ONE entry — with nothing behind it there is nothing to lose, so
+it passed either way. It now queues three behind `loader_busy`; against the
+pre-fix RTL that costs 259 checks, against the fix 8005/0.
+
 ### Phase 5 — Hardening
 Port MacPlus's Phase 5 work and its six-defect review list (§7). Stress the
 structures nothing exercises incidentally: commit-queue depth, write-to-one-
