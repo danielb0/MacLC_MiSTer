@@ -38,6 +38,14 @@
  * parameters — see tb_mfm_write_path.v's header for why that is necessary and
  * why it is safe.
  *
+ * ★ INVARIANCE MUTANT (review 2026-09-17): delay the engine's q_pop by ONE
+ *   more clk (`reg q_pop_r2; always @(posedge clk) q_pop_r2 <= q_pop_r;
+ *   assign q_pop = q_pop_r2;` in ism_write_engine.v) and this bench must
+ *   STILL PASS. swim.v's FIFO block runs on cen, so before the pending latch
+ *   (`ism_wr_pop_p`) that mutant lost every pop and the underrun with it:
+ *   22,475 bytes to the medium, nothing committed, ACTION never cleared - a
+ *   8/27 FAIL that proved the shipped RTL worked only by cep/cen phase luck.
+ *
  * Build + run (Icarus 12.x, from the REPO ROOT):
  *   /c/iverilog/bin/iverilog -g2012 -s tb_swim_ism_arm \
  *     -o scratch/mfm/tb_arm.vvp verilator/tb_swim_ism_arm.v \

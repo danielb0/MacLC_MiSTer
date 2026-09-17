@@ -1860,7 +1860,11 @@ module emu
 			// cstin_edges[3:0], park1[7:0], park6[7:0]}.
 			hud_w7 <= dbg_flp_media;
 			hud_w8 <= {dbg_mfm_stall_w, hud_e81_cnt};
-			hud_w9 <= {dbg_ism_state[31:16], 7'b0, dbg_flp_rej_step};
+			// [31:16] Mode+Setup as before; the 7 bits that were 0 now carry
+			// the MFM write witness (see the PISM probe comment):
+			// [15] wr_active [14] anchor_ok [13:9] anchor_sector.
+			hud_w9 <= {dbg_ism_state[31:16], dbg_ism_state[15],
+			           dbg_ism_state[13:8], dbg_flp_rej_step};
 			hud_w10 <= hud_e142_pos;
 			hud_w11 <= {dbg_flp_status, 6'b0, dsk_int_ins, 1'b0,
 			             dbg_flp_disk_data, dbg_flp_raw};
@@ -2679,6 +2683,23 @@ module emu
 		.instance_id ("PFSW"), .probe_width (32), .source_width(1),
 		.sld_auto_instance_index ("YES")
 	) cp_pfsw (.probe(flp_int_sdw_dbg), .source(), .source_clk(clk_sys), .source_ena(1'b1));
+
+	// PISM: what the driver PROGRAMMED into the ISM, plus the MFM write
+	// witness. [31:24] Mode register, [23:16] Setup register, then the stage-2
+	// bits that had no hardware witness at all until now:
+	//   [15] write engine ACTIVE   (mode & 0x18 == 0x18, and an MFM datapath)
+	//   [14] write ARM             (mode & 0x18 == 0x18, engine gate aside)
+	//   [13] ANCHOR VALID          0 => a data field would be REFUSED, not placed
+	//   [12:8] ANCHOR SECTOR       1-based; the sector of the ID field the CPU
+	//                              last POPPED - what places every MFM write
+	// then [7:0] the drive-select/enable bits as before.
+	// ★ [13:8] ARE THE FIRST THING TO READ if a written sector lands somewhere
+	// unexpected: they separate "the anchor was wrong" (plan section 6.1's
+	// silent, destructive failure mode) from "everything downstream of it was".
+	altsource_probe #(
+		.instance_id ("PISM"), .probe_width (32), .source_width(1),
+		.sld_auto_instance_index ("YES")
+	) cp_pism (.probe(dbg_ism_state), .source(), .source_clk(clk_sys), .source_ena(1'b1));
 `endif
 
 	// diskEject is set by macos on eject

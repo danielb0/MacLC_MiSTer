@@ -123,7 +123,9 @@ module swim
 	output [7:0]  dbg_iwm_latch,     // live IWM read-data latch
 	output        dbg_flp_byte_stb,  // 1-clk delivered-byte strobe (capture ring)
 	output [7:0]  dbg_flp_raw,      // pre-encoder SDRAM fetch latch (internal drive)
-	// {ism_mode_reg, ism_setup, 8'b0, diskEnableInt, driveSel, devsel_int,
+	// {ism_mode_reg, ism_setup,
+	//  wr_active, wr_arm, anchor_ok, anchor_sector[4:0],   <- bits 15:8
+	//  diskEnableInt, driveSel, devsel_int,
 	//  devsel_ext, selonly_int, ism_mode, motor_reg, 1'b0} — what the driver
 	// actually PROGRAMMED. Needed because the 08-04 capture showed _enable
 	// still high after keying it on the ISM drive-select code, i.e. that code
@@ -522,6 +524,24 @@ module swim
 
 	wire        ism_wr_pop;
 	wire        ism_wr_underrun;
+	// ★ THE ENGINE'S POP AND UNDERRUN ARE 1-CLK PULSES, AND THE BLOCK THAT
+	// ACTS ON THEM RUNS ON cen (one clk in four). They are held here until
+	// that block takes them, so the handshake does not depend on which clk
+	// the pulse happens to land on. Before this latch it worked only because
+	// the tick fires the clk after cep and the engine's registered pulse then
+	// landed exactly on cen - an alignment nothing stated or checked. A mutant
+	// that delayed the pop by ONE more clk lost every pop AND the underrun
+	// that should have stopped the write: tb_swim_ism_arm saw 22,475 bytes
+	// reach the medium for a 528-byte field, nothing committed, ACTION never
+	// cleared (review 2026-09-17). A pulse ON a cen clk is consumed directly
+	// and never held; one between cen clks waits at most three.
+	reg  ism_wr_pop_p, ism_wr_unr_p;
+	always @(posedge clk) begin
+		ism_wr_pop_p <= cen ? 1'b0 : (ism_wr_pop_p | ism_wr_pop);
+		ism_wr_unr_p <= cen ? 1'b0 : (ism_wr_unr_p | ism_wr_underrun);
+	end
+	wire ism_wr_pop_now = ism_wr_pop      | ism_wr_pop_p;
+	wire ism_wr_unr_now = ism_wr_underrun | ism_wr_unr_p;
 	ism_write_engine ism_wr (
 		.clk(clk), .rst(~_reset),
 		.active(ism_write_active),
@@ -724,7 +744,17 @@ module swim
 		end
 	end
 	assign dbg_ism_scan = {scw_run, scw_hunt_ms, scw_par, scw_gap_us};
-	assign dbg_ism_state = {ism_mode_reg, ism_setup, 8'b0,
+	// ★ BITS 15:8 ARE THE MFM WRITE WITNESS (stage 2), in what used to be a
+	// dead 8'b0 field. The ANCHOR is the riskiest signal in the write path -
+	// plan section 6.1's whole argument is that placing a write by the wrong
+	// position fails SILENTLY and, in UK101's case, destructively - and until
+	// now it was observable nowhere on hardware. If a sector lands somewhere
+	// unexpected, these bits say whether the anchor was valid and what it
+	// named, which separates "the anchor was wrong" from "everything
+	// downstream of the anchor was wrong". Read over JTAG as probe PISM.
+	assign dbg_ism_state = {ism_mode_reg, ism_setup,
+	                        ism_write_active, ism_write_arm,
+	                        ism_anchor_ok, ism_anchor_sector,
 	                        diskEnableInt, driveSel, ism_devsel_int, ism_devsel_ext,
 	                        ism_selonly_int, ism_mode, diskEnableExt, 1'b0};
 
@@ -1025,7 +1055,7 @@ module swim
 			// the engine's underrun: error b0 (MAME's write-side code, and
 			// only if nothing is pending already - `&& !m_ism_error`) and
 			// ACTION off, so the write stops itself as the hardware does
-			if (ism_wr_underrun) begin
+			if (ism_wr_unr_now) begin
 				if (ism_error == 8'd0) ism_error[0] <= 1'b1;
 				ism_mode_reg[3] <= 1'b0;
 			end
@@ -1077,13 +1107,13 @@ module swim
 				end else
 					ism_error[2] <= 1'b1;          // underrun
 			end
-			else if (ism_wr_pop && ism_cpu_push) begin
+			else if (ism_wr_pop_now && ism_cpu_push) begin
 				// one out, one in: the survivor shifts down and the new word
 				// lands behind it, so the level is unchanged
 				ism_fifo[0] <= ism_fifo[1];
 				ism_fifo[ism_fifo_pos - 2'd1] <= ism_cpu_word;
 			end
-			else if (ism_wr_pop) begin
+			else if (ism_wr_pop_now) begin
 				ism_fifo[0]  <= ism_fifo[1];
 				ism_fifo_pos <= ism_fifo_pos - 2'd1;
 			end

@@ -1135,6 +1135,39 @@ because all of them start downstream of the guest:**
    and the guest then polled Handshake b7 forever against an engine that had
    already disarmed. The ring is emptied on that edge; the CPU FIFO is not.
 
+★ **REVIEW 2026-09-17 — DEFECT 2 ABOVE WAS FIXED BY LUCK, NOW BY DESIGN.**
+Registering `q_pop` worked because swim.v's FIFO block runs on `cen` (one clk
+in four) and the registered pulse — tick the clk after `cep`, pop one later —
+landed exactly on `cen`. Nothing stated or checked that. A mutant delaying the
+pop by ONE more clk failed 8/27 in `tb_swim_ism_arm`: 22,475 bytes to the
+medium for a 528-byte field, nothing committed, and the underrun that should
+have stopped it lost too, so the engine streamed a stale byte forever. swim.v
+now holds both pulses in pending bits (`ism_wr_pop_p`/`ism_wr_unr_p`) that the
+`cen` block consumes and clears, so the handshake is phase-independent; the
+delayed-pop mutant is kept in the bench header as an INVARIANCE check that
+must PASS. Also noted, not fixed: the engine drops a pending second CRC byte
+if WRITE is cleared between the two (real silicon finishes its shift
+register) — wait for the Sony driver's actual end-of-write sequence on
+hardware before guessing; the decoder's reject counter is the witness.
+
+★ **FIRST HARDWARE RUN 2026-09-17: PASS, BYTE-EXACT.** Fit `4d3029a1`
+(STA met +0.248 ns, Stage 2 pieces 1-3 + the pending-latch fix + the PISM
+witness). The guest copied the Speedometer 4.02 folder (~760 KB of forks, 4
+files) from the SCSI boot volume onto a writable 1.44 MB raw image (the Quark
+installer disk, 917 KB free) and ejected. Offline: `hfs_check.py` walks the
+written image clean; 1,577 sectors changed against the baseline, all inside the
+MDB/bitmap/catalog/extents nodes and the copied files' extents; every fork is
+byte-identical to the LIVE `boot.vhd` source (resource forks after the usual
+$30-$7D header mask). JTAG at the end of the session: PFSW refused=0
+overflow=0, PISM engine idle with a VALID anchor (sector 16) — the
+"armed with no anchor" refusal never fired. ★ The first comparison was against
+an August backup of the vhd and showed 9 differing chunks in the app's
+resource MAP; those were the app having rewritten its own fork on 09-15
+(handle fields at 12-byte stride), not the write path — the tells for a
+write-path fault are a chunk equal to the BASELINE (unwritten) or to a
+DIFFERENT source chunk (misplaced), and neither occurred. Compare against the
+live source, and classify before blaming the RTL.
+
 ★ **A DRIVER MUST PRIME THE FIFO BEFORE SETTING WRITE.** An engine armed
 against an empty FIFO underruns on its very next byte-time and stops itself —
 correct behaviour, and the reason defect 3 above was fatal rather than
@@ -1151,8 +1184,9 @@ the CRC belonged, and the decoder never completed a field: no reject, no
 commit, nothing to see. That give-up is a hard assertion now.
 
 **Still ahead for stage 2:** MFM FORMATTING (§1 — the decoder accepts in-stream
-ID fields already, so this is ISM sequencing, not new decoding), and the whole
-thing is UNPROVEN ON HARDWARE.
+ID fields already, so this is ISM sequencing, not new decoding); sector writes
+are HARDWARE-VALIDATED as of 2026-09-17 (above), one trial so far — a
+larger soak (fill the disk, remount, delete, refill) is still owed before PR.
 
 
 Design starting point is §6.1, from UK101. **The anchoring design question is

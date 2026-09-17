@@ -63,3 +63,37 @@ set b [rd PFSW]
 puts [format "PFSW = %08X  %s" $a [decode $a]]
 puts [format "PFSW = %08X  %s" $b [decode $b]]
 if {(($a >> 24) & 0xFF) == 0} { puts "REFUSAL COUNT 0 - no sector was lost (the queue never filled)" } else { puts "*** REFUSAL COUNT NONZERO - the sector queue filled and commits were REFUSED; those sectors are NOT on the card ***" }
+
+# ---------------------------------------------------------------------------
+# PISM: the ISM registers the driver programmed, plus the MFM WRITE witness.
+# The anchor is what places every MFM write - an MFM data field does not name
+# its sector, so the write goes where the ID field the CPU last POPPED said it
+# should (plan section 6.1). A wrong anchor writes a WELL-FORMED sector to the
+# WRONG place, silently, which is why this is the first thing to read when a
+# written sector turns up somewhere unexpected.
+# ---------------------------------------------------------------------------
+proc decode_ism {v} {
+    set mode   [expr {($v >> 24) & 0xFF}]
+    set setup  [expr {($v >> 16) & 0xFF}]
+    set act    [expr {($v >> 15) & 1}]
+    set arm    [expr {($v >> 14) & 1}]
+    set aok    [expr {($v >> 13) & 1}]
+    set asec   [expr {($v >>  8) & 0x1F}]
+    set anchor [expr {$aok ? "sector $asec" : "INVALID"}]
+    return [format "MODE=%02X SETUP=%02X  write:%s arm=%d  anchor=%s"         $mode $setup [expr {$act ? "ACTIVE" : "idle"}] $arm $anchor]
+}
+if {[info exists idx(PISM)]} {
+    set s [rd PISM]
+    puts [format "PISM = %08X  %s" $s [decode_ism $s]]
+    set act [expr {($s >> 15) & 1}]
+    set aok [expr {($s >> 13) & 1}]
+    set asec [expr {($s >> 8) & 0x1F}]
+    if {$act && !$aok} {
+        puts "*** WRITE ENGINE ARMED WITH NO ANCHOR - a data field carrying no ID field of its own will be REFUSED, not placed ***"
+    }
+    if {$aok && ($asec < 1 || $asec > 18)} {
+        puts "*** ANCHOR $asec IS OFF THE MEDIUM (1..18 HD / 1..9 DD) ***"
+    }
+} else {
+    puts "PISM not in this fit (probes-off build?)"
+}

@@ -110,6 +110,12 @@ module ism_write_engine (
 	// one stale byte 29,689 times. Registering it costs one cycle of latency
 	// the caller does not care about (the next tick is a whole byte-time away)
 	// and makes the handshake unambiguous in any scheduler.
+	//
+	// It is still a 1-clk PULSE, and the caller's FIFO block runs on a clock
+	// enable (swim.v: cen, one clk in four). The caller holds the pulse in a
+	// pending bit until its block takes it - see swim.v `ism_wr_pop_p` - so
+	// nothing here may assume which clk the pulse lands on. `underrun` is
+	// held the same way.
 	reg q_pop_r;
 	assign q_pop = q_pop_r;
 	wire consume = active && tick && !crc_2nd && !q_empty;
