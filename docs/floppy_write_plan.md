@@ -1168,6 +1168,30 @@ write-path fault are a chunk equal to the BASELINE (unwritten) or to a
 DIFFERENT source chunk (misplaced), and neither occurred. Compare against the
 live source, and classify before blaming the RTL.
 
+★ **SAME EVENING — READ CONTROL + DOS DISKS, ALL ON FIT `4d3029a1`, ALL
+BYTE-EXACT.** The read-regression control the plan demanded (Stage 2 touched
+swim.v's FIFO/ring, which reads share) is CLOSED: a Finder copy of the whole
+System 7.5.5 Update 1 disk (24 files, 1,377,630 fork bytes) matches its DC42
+image exactly. ★ First run of it was accidentally on the old phase4b fit; it
+was redone on `4d3029a1` — check PISM when in doubt, the old fit has no PISM.
+**DOS 1.44 MB disks (PC Exchange 2.x under 7.5.5):** READ — Outrun.img, 57 of
+57 visible files byte-identical to a 7-Zip extraction of the image (the 3
+hidden/system DOS files and a 0-byte stray are not shown by PC Exchange);
+WRITE — Apple File Exchange 7.0 copied onto Outrun.img: 7-Zip integrity test
+OK (67 files), all 61 original files unchanged, and the 258,097-byte resource
+fork PC Exchange wrote into `RESOURCE.FRK` is byte-identical to the source
+(PC Exchange writes forks raw, so no header mask needed; it also wrote
+FINDER.DAT + DESKTOP). That is a SECOND filesystem client with its own access
+pattern through the same MFM path, and the first PC disk this core has ever
+read or written. ★ **Apple File Exchange 7.0 does NOT work under 7.5.5 on this
+core** — "cannot read this disk" on DOS AND Mac MFM disks, on the old fit too
+— a guest-software incompatibility, not a drive fault (the Finder read the
+same disks perfectly). Use PC Exchange 2.x (Custom Install from a 7.5 CD; the
+1.0.x copies on the boot volume are 7.1-era). 720K images are DOS-only by
+construction (no HFS 720K format exists) and are still UNTESTED on hardware.
+PC-side oracles: 7-Zip reads FAT images directly; `machfs` (pip) builds HFS
+images with resource forks from PC files (used to deliver PC Exchange 1.0.4).
+
 ★ **A DRIVER MUST PRIME THE FIFO BEFORE SETTING WRITE.** An engine armed
 against an empty FIFO underruns on its very next byte-time and stops itself —
 correct behaviour, and the reason defect 3 above was fatal rather than
@@ -1185,8 +1209,10 @@ commit, nothing to see. That give-up is a hard assertion now.
 
 **Still ahead for stage 2:** MFM FORMATTING (§1 — the decoder accepts in-stream
 ID fields already, so this is ISM sequencing, not new decoding); sector writes
-are HARDWARE-VALIDATED as of 2026-09-17 (above), one trial so far — a
-larger soak (fill the disk, remount, delete, refill) is still owed before PR.
+are HARDWARE-VALIDATED as of 2026-09-17 (above): Mac HFS write, whole-disk
+HFS read control, DOS read AND write via PC Exchange — one trial each; a
+larger soak (fill the disk, remount, delete, refill) and a 720K (DD MFM) run
+are still owed before PR.
 
 
 Design starting point is §6.1, from UK101. **The anchoring design question is
