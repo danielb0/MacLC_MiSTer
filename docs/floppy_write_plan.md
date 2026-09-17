@@ -989,11 +989,49 @@ silently produces a self-consistent but wrong byte stream.
 
 ## 8. Stage 2 — MFM/ISM writes
 
+★ **PIECE 1 OF 3 LANDED 2026-09-17: the MFM write decoder.**
+`rtl/mfm_write_decoder.v`, the algebraic inverse of `mfm_track_encoder.v`, with
+`verilator/tb_mfm_write_decoder.v` as its gate (**147 checks, 0 failures**;
+build command in the bench header). It parses the decoded byte stream plus the
+mark bit — no PLL, no bit windows — and recovers a CRC-valid 512-byte payload
+through the same `buf_addr`/`buf_data` registered read port
+`floppy_write_committer.v` already drives, so the committer needs no change.
+
+The anchoring rule from §6.1 is implemented as a PRIORITY, not a guess:
+an in-stream CRC-valid ID field (the format case) names the sector; otherwise
+`anchor_sector`, an INPUT, does; with neither, the field is refused. One ID
+arms exactly one data field. `addr` is built from the PHYSICAL `track`/`side`
+inputs with only the sector number taken from the field —
+`floppy_track_decoder.v`'s rule — so an ID claiming another cylinder cannot
+reach another track; `amark_cyl`/`amark_head` are exported for a caller that
+wants to police a format, and steer nothing.
+
+★ **The bench was mutation-tested, and that is what made it worth having.**
+Eleven mutants, one per property it claims to police (bounds check removed, ID
+never disarmed, address taken from the ID's cylinder, anchor preferred over the
+ID, data CRC unchecked, sector off-by-one, committed with no identity source,
+ID CRC unchecked, short A1 run accepted, F8 rejected, any address mark
+accepted). **Nine were written first and one SURVIVED** — nothing tested the
+"three A1s or refuse" guard — so section 11 was added for it and for the
+address-mark cases. All eleven are killed now. A bench that passes first time
+against its own author's RTL has proved nothing until something has been broken
+under it.
+
+**Still ahead, and neither is started:** the ISM write engine (`rtl/swim.v:376`
+still gates `ism_arm` with WRITE off, so Mode b4 is a no-op) and the
+identity-bearing staging ring that produces `anchor_sector`. The ring is the
+Phase 3 carve-out that did NOT land: `floppy.v` delivers `mfm_byte`/`mfm_mark`/
+`mfm_stb` with no sector identity attached, and `swim.v`'s 16-deep
+`ism_stage` entry has bits 15:11 free — enough for a 5-bit sector number, which
+is all the anchor needs given track/side come from the drive.
+
+
 Design starting point is §6.1, from UK101. **The anchoring design question is
 answered.** What remains is implementation against this core's structures, plus
 two pieces UK101 never had to build:
 
-- an **MFM decoder**, the algebraic inverse of `rtl/mfm_track_encoder.v` — a
+- an **MFM decoder** — **DONE 2026-09-17**, see above — the algebraic inverse
+  of `rtl/mfm_track_encoder.v`, a
   second decoder, not a parameterisation of the GCR one. ★ 2026-09-15: this is
   a BYTE-stream parser plus CRC-16-CCITT, not a flux decoder — see §1, which
   also brings MFM formatting into scope and re-rates this work downward;
