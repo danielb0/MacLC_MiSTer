@@ -730,7 +730,10 @@ Surveyed 2026-09-18, all verified in the tree rather than assumed:
 | piece | state |
 |---|---|
 | GCR decoder's format reporting | **DONE** — `amark`, `amark_sector`, `fmt_mark`, `fmt_ds` all exist… |
-| …but nothing consumes them | `rtl/floppy.v:978-980` wires all three to **unconnected stubs** |
+| …and they are already wired | `rtl/floppy.v:1003-1006` routes them to `wrSecAmark` / `wrSecAmarkSector` / `wrSecFmtMark` / `wrSecFmtDs`, whose only consumer today is the `wr_anchor1` cone anchor (`:1087`). ★ Corrected in review 2026-09-18: an earlier draft cited `:978-980` as "unconnected stubs" — those are the **MFM** decoder's `amark_*` ports (`amark_cyl` exists only there). The anchor stays when the nets gain a real consumer (never-fold law). |
+| IWM write-mode LEVEL in `floppy.v` | **MISSING** — the donor's `wrEnd` needs it (6A.3). `swim.v:215` has `q7`; `floppy.v` has no `writeMode` port |
+| `mediaSides` (volume-header sniff) | **MISSING** — `dsk_int_ds` is FILE SIZE (`MacLC.sv:2728`), i.e. the donor's `img800k`, not its `mediaSides` (6B) |
+| ISM write-active level in `floppy.v` | `swim.v:510` exports `mfm_wr_active`; **nothing consumes it** — an MFM `wr_end` would need it (6C) |
 | `decReady` (the relay's `wr_byte`) | **EXISTS** — `rtl/floppy.v:855`, the same signal MacPlus feeds the relay |
 | MFM write decoder's format support | **DONE** — `rtl/mfm_write_decoder.v:25` handles "an ID field seen in this stream, CRC-valid, not yet consumed. That is the FORMAT case", and exports `amark_*` so a caller can police a format against the head |
 | Identity-bearing staging ring, format-neutral committer | **DONE** (Phase 3 carve-outs, §1) |
@@ -751,13 +754,26 @@ the relay — **78 changed lines**, and the relay is a cleanly separable block.
    short of the written mark. Take it verbatim; do not "improve" the
    five-bytes-behind-the-D5 arithmetic.
 2. **Wire it in `floppy.v`**, mirroring MacPlus `floppy.v:180-183`:
-   `.wr_byte(decReady)` (exists), `.wr_mark(amark)` and
-   `.wr_mark_sector(amark_sector)` — today's unconnected stubs, just filled
-   in — and `.wr_end(wrEnd)`.
-3. **Create `wrEnd`.** The one signal with no LC equivalent: a pulse when the
-   write ends and the head returns to reading. MacPlus derives it in its write
-   FSM; ours is `writeBusyReg`-based, so this is a small local addition, not a
-   port.
+   `.wr_byte(decReady)` (exists), `.wr_mark(wrSecAmark)` and
+   `.wr_mark_sector(wrSecAmarkSector)` — the nets already declared at
+   `floppy.v:926` and driven by the decoder, which gain the encoder as a
+   second consumer beside the anchor — and `.wr_end(wrEnd)`.
+3. **Create `wrEnd` — and it needs a NEW INPUT, not just local logic.**
+   ★ Corrected in review 2026-09-18; the earlier draft said "writeBusyReg-
+   based, a small local addition", which would have broken the relay on
+   hardware. The donor bounds the write as a whole with
+   `wrBusy = (writeMode && !_enable) || writeBusyReg` (`floppy.v:283`), and
+   `writeMode` is IWM **Q7**, passed in from `iwm.v:208`. Our `floppy.v` has
+   no such port. `writeBusyReg` alone drops at the end of EVERY 128-cep byte
+   and is re-set by the next `writeReq`, so a busy-based `wrEnd` pulses
+   between every byte of the track: the relay fires after the first address
+   field, restarts the layout mid-format, and disarms. So: add a `writeMode`
+   input to `floppy.v`, drive it from `swim.v`'s `q7` register (`swim.v:215`)
+   qualified `!ism_mode` exactly as `dataRegWrite` is (`swim.v:247`), tie it
+   to 0 on the external-drive instance, and port the donor's
+   `wrBusyPrev`/`wrEndD1`/`wrEnd` block (`floppy.v:280-294`) verbatim — the
+   two-clock delay so the encoder sees the last mark before the end is part
+   of it.
 
 ★ **Why the relay exists at all** (§1.1 defect 1, and the reason a naive
 format fails on hardware with `fmt1Err`): the ROM requires sector 0 to be the
@@ -777,11 +793,29 @@ wire doubleSidedDisk = drive800k && img800k && (fmtSeen ? fmtDs : mediaSides);
 Three terms, each a ceiling on the next — **drive mechanism, then file size,
 then the medium itself**. On the LC:
 
-- `mediaSides` → exists as `dsk_int_ds` (`MacLC.sv:2338` already passes it in
-  as `diskSides`);
+- `drive800k` → a **constant 1**: the LC has a SuperDrive and nothing else;
+- `img800k` → **exists as `dsk_int_ds`** (`MacLC.sv:2728`: file size 819,200,
+  or DC42 format byte 1; `MacLC.sv:2338` passes it in as `diskSides`);
 - `fmtSeen` / `fmtDs` → latch from the decoder's **existing** `fmt_mark` /
-  `fmt_ds` outputs, which is precisely what those carve-out ports were for;
-- `drive800k` / `img800k` → new terms.
+  `fmt_ds` outputs, already on the `wrSecFmtMark` / `wrSecFmtDs` nets; clear
+  on `!_reset || writePathReset` as the donor does (`floppy.v:195`);
+- `mediaSides` → **DOES NOT EXIST HERE.** ★ Corrected in review 2026-09-18;
+  the earlier draft said it "exists as `dsk_int_ds`", which is the file-size
+  term above. The donor's `mediaSides` is a **volume-header sniff in its
+  loader** (`floppy_loader.v:60-135` at `b340c9f`): as sector 2 streams in,
+  latch the MDB signature (`D2D7` MFS / `4244` HFS), `drNmAlBlks` (word 9)
+  and `drAlBlkSiz` (words 10-11); a seven-cycle shift-add gives the volume
+  size in 512-byte blocks; `media_ds = !mdb_ok || (vol_blocks > 1200)`, i.e.
+  no MDB means double-sided; published with `done`. About 70 lines, and a
+  clean block to port even though the loaders differ elsewhere (443 diff
+  lines). Our loader already captures sector 0 as it streams
+  (`floppy_loader.v:164`), so the pattern is in place; **build it in the
+  same drain as 6D's word latches** — same file, same sector peek, same fit.
+  ★ Why it is load-bearing and not a nicety: without it defect 2 comes back
+  on REMOUNT. In-session, `fmtDs` latches the One-Sided format byte and the
+  ceiling holds; the remount clears `fmtSeen`, the fallback is file size,
+  and the 819,200-byte file is advertised double-sided again — over a side
+  the erase never wrote. The sniff sees the 400K MDB and keeps it single.
 
 ★ **The defect this prevents** (§1.1 defect 2): the address field's format byte
 was derived from the image file's SIZE, so a One-Sided erase of an 819,200-byte
@@ -795,6 +829,22 @@ not a gate (the guest refuses MFS writes with -4, see the memory note). A 400K
 **format** is a different operation and is exactly what this ceiling governs,
 so One-Sided erase must still be exercised.
 
+★ **What a One-Sided erase leaves in the file** (checked 2026-09-18 against
+`Test disks/Blank800Kas400K.dsk`, an 819,200-byte file holding a 391-block
+MFS volume): the erase writes only the sectors the single-sided geometry
+addresses, i.e. the FIRST 409,600 bytes, laid out exactly as a 400K image
+(`floppy_track_encoder.v:30`: with `sides` low, track t sector s lands at
+`(soff(t)+s)*512`). **The upper half is left as it was** — if the disk
+previously held an 800K volume with files, their sectors survive there,
+unreferenced, exactly as side 1 of a real diskette survives a One-Sided
+erase. The new MDB at sector 2 replaces the old one, so no reader follows a
+path into the remnant. The file stays readable EVERYWHERE: a raw image is
+logical blocks in order, and the encoder serves logical block N from offset
+N*512 in both sidedness modes (`(2*soff + side*spt + s)*512` is the standard
+double-sided numbering), so any tool sees a 400K volume on an 800K medium.
+Gate consequence: an offline diff after a One-Sided erase compares the first
+409,600 bytes only and treats the upper half as don't-care.
+
 #### 6C — MFM formatting: the genuinely new work
 
 Not the flux job it sounds like (§1): the LC's MFM path is BYTE-level, so a
@@ -802,12 +852,33 @@ guest format is the CPU pushing `00 x12 / A1 A1 A1 (mark) / FE / C H R N /
 CRC-16 / 4E …` as plain bytes. The decoding half is **already done**. What is
 missing:
 
-1. **An MFM read-side relay.** `rtl/mfm_track_encoder.v` has none, and the
-   same `fmt1Err`-class failure applies: after a format the guest's next read
-   must find the sector the format just laid down. The GCR relay is the model,
-   but the arithmetic differs — MFM is 9 or 18 sectors of fixed length with no
-   track zones, so `rev_len` becomes geometry (`hd`), not a `track[6:4]`
-   lookup. Simpler than the GCR version, not a copy of it.
+0. **★ FIRST, ESTABLISH WHETHER AN MFM RELAY IS NEEDED AT ALL** (added in
+   review 2026-09-18). `fmt1Err` is a ROM **GCR**-format behaviour. The MFM
+   verify is the Sony driver's whole-track read (`a6e966 → a6f308`, 73-attempt
+   budget, `-84 verErr`; `docs/sony_driver_mfm_read_reference.md` §1) and
+   whether it is ORDER-sensitive is unknown. Two facts change the design
+   space: the ISM write tick IS the encoder's tick (`swim.v:523` derives
+   `ism_wr_tick` from the read strobe `mfm_stb_sel`), and the MFM encoder
+   free-runs during a write (`floppy.v:472-505` has no write gating), so
+   after a format the encoder's position already says "the disk kept
+   spinning". A relay is needed only if the driver expects the WRITTEN order.
+   Step 0 is therefore a MAME run of a 1.44 MB Erase with the existing tap
+   (`verilator/mame/floppy/floppy_tap.lua`, `sonyvars_watch.lua`) and a
+   breakpoint on the verify routine, recording: (a) whether the format write
+   starts at the index pulse; (b) the gap lengths the driver writes — if its
+   gap3 differs from the encoder's pc_dsk 108, the written track is not
+   12,422 bytes and a relay's revolution length must be the DRIVER's, not the
+   encoder's; (c) whether the verify reads sectors in order. Design from
+   that, or skip the relay.
+1. **An MFM read-side relay, IF step 0 says so.** `rtl/mfm_track_encoder.v`
+   has none. The GCR relay is the model, but the arithmetic differs — MFM is
+   9 or 18 sectors of fixed length with no track zones, so `rev_len` becomes
+   geometry (`hd`, per step 0b), not a `track[6:4]` lookup. Simpler than the
+   GCR version, not a copy of it. `wr_byte` is `mfm_wr_stb`, `wr_mark` /
+   `wr_mark_sector` are the MFM decoder's `amark` / `amark_sector` (today's
+   real unconnected stubs, `floppy.v:978-981`), and `wr_end` needs
+   `swim.v`'s exported-but-unconsumed `mfm_wr_active` plumbed into
+   `floppy.v` — there is no MFM write-end signal there today.
 2. **ISM format sequencing.** The write engine exists (`rtl/ism_write_engine.v`,
    stage 2); what is unproven is a whole-track write driven by the Sony
    driver's format path rather than its sector-write path. Ground-truth it
@@ -817,6 +888,21 @@ missing:
    2026-09-18 proved the anchor tracks DD geometry (readings reached 9 and
    never exceeded it), which is the evidence that makes a DD format plausible
    rather than hopeful.
+4. **★ Cross-encoding erase must fail cleanly — it is NOT supported** (added
+   in review 2026-09-18; the earlier draft did not mention it). On a real
+   SuperDrive with DD media the Erase dialog offers both Macintosh 800K and
+   DOS 720K (confirm on the bench). Here the encoding is pinned by file size:
+   819,200 is GCR, 737,280 is MFM, and hps_io cannot resize a file. Erasing
+   an 800K image as 720K puts the driver in ISM mode with `mfm_disk` low, so
+   `mfm_spinning` is 0, the write tick never fires, and the engine neither
+   pops nor underruns — whether the driver ERRORS or HANGS is unknown. The
+   reverse (a 720K image erased as 800K) decodes GCR that the committer mux
+   (`wrIsMfm`) ignores, so it should end in a verify error. The IMAGE is
+   structurally safe in both directions (only the matching decoder reaches
+   the committer); the GUEST behaviour is the open question and is a
+   hardware gate: both directions must error out, not hang. If one hangs,
+   the fix is upstream (refuse at the driver's density sense), never a
+   change to which decoder commits.
 
 #### 6D — Riding along: the DOS-in-DC42 write-protect
 
@@ -825,9 +911,24 @@ the `flp_int_wp` term in `MacLC.sv` — the same two files this phase edits, and
 this phase needs a fit anyway. **Detect DOS positively (`0x55AA`), never as
 "not HFS", or it write-protects the blank disk about to be formatted.**
 
+★ **Scope ruling, owner, 2026-09-18:** a DOS-formatted DC42 is extremely rare
+if it exists at all. We do what we can to prevent writing to one, and we
+DOCUMENT the limit; we do not chase completeness. Concretely: the lock is
+latched at MOUNT, so a DOS Erase of an HFS or blank DC42 performed in-session
+is NOT protected until the next remount (the format writes boot sector, FAT
+and root directory, none of which touch the refused final block; the exposure
+is a later file landing in the last cluster, refused whole and counted in
+`dbg_refused`). That in-session window is ACCEPTED and goes in the user-facing
+note alongside the "DOS in DC42 is unsupported" line. Latching the boot
+signature from the committer's own sector-0 write would close it and is not
+worth a second path.
+
 #### Order, and why
 
-**6A+6B together, then 6C, then 6D with whichever fit happens first.**
+**6A+6B+6D together, then 6C.** (Revised in review 2026-09-18: 6D was "with
+whichever fit happens first"; it now rides with 6B because the `mediaSides`
+sniff and 6D's word latches are the same loader drain, the same sector peek
+and the same fit.)
 
 GCR first because it is a port with a known-good donor and an unambiguous
 behavioural target, so it establishes the relay/sidedness plumbing against a
@@ -840,6 +941,15 @@ Offline, per commit:
 - `tb_floppy_track_decoder` (incl. `+single` for 400K), `tb_gcr_read`,
   `tb_floppy_commit`, `tb_floppy_sd_writer`, `tb_disk_swap`,
   `tb_mfm_write_path`, `tb_swim_ism_arm`, `tb_pds_enet` after any SDRAM edit.
+- ★ Added in review 2026-09-18, benches for files this phase EDITS that the
+  list above missed: `tb_floppy_track_encoder` (the relay's home file; it
+  already carries the READY_GAP and `#1` edge discipline the relay bench
+  should extend), `tb_mfm_write_decoder`, `tb_ism_write_engine`, and
+  `tb_floppy_loader` for the sniff as well as 6D. Note the donor has NO
+  benches at all (`../MacPlus_MiSTer/verilator/` holds no `tb_*.v`), so the
+  relay has never had one: its only validation was hardware through a
+  chained external drive on a Plus. The relay bench below is the first, not a
+  port.
 - Quartus **analysis & synthesis** as the elaboration check (catches Error
   10028, which Icarus tolerates — CLAUDE.md).
 - ★ A **new bench for the relay**: drive a synthetic format stream into the
@@ -853,7 +963,14 @@ On hardware, after a fit:
   and `gcr_data_census.py` on the resulting image to check every address and
   data field offline.
 - **One-Sided erase** of an 800K image — the sidedness-ceiling gate. The disk
-  must come back 400K, and must NOT advertise itself double-sided.
+  must come back 400K, and must NOT advertise itself double-sided — **across a
+  remount** (that is the `mediaSides` half of 6B). Byte-diff the first
+  409,600 bytes only; the upper half is remnant (6B note).
+- **Cross-encoding erase** (6C.4): an 800K image erased as DOS 720K and a
+  720K image erased as Macintosh 800K must both END IN AN ERROR DIALOG, not a
+  hang, and the image must be byte-identical afterwards.
+- **6D mount triple**: a DOS DC42 mounts write-protected, an HFS DC42
+  writable, a BLANK DC42 writable.
 - **MFM**: format a blank 1.44 MB, then the short soak (fill / remount);
   `scripts/hfs_fork_diff.py`. Then a 720K DOS format verified with
   `scripts/fat_diff.py`.
