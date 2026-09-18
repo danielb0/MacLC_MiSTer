@@ -810,7 +810,8 @@ then the medium itself**. On the LC:
   clean block to port even though the loaders differ elsewhere (443 diff
   lines). Our loader already captures sector 0 as it streams
   (`floppy_loader.v:164`), so the pattern is in place; **build it in the
-  same drain as 6D's word latches** — same file, same sector peek, same fit.
+  same file and fit as 6D's loader change** (6D no longer latches words; it
+  is a `sec_total` edit).
   ★ Why it is load-bearing and not a nicety: without it defect 2 comes back
   on REMOUNT. In-session, `fmtDs` latches the One-Sided format byte and the
   ceiling holds; the remount clears `fmtSeen`, the fallback is file size,
@@ -904,31 +905,70 @@ missing:
    the fix is upstream (refuse at the driver's density sense), never a
    change to which decoder commits.
 
-#### 6D — Riding along: the DOS-in-DC42 write-protect
+#### 6D — Riding along: the DC42 partial final block — FIX IT, not lock it
 
-Specified in §8.1 and deliberately unbuilt. It touches `floppy_loader.v` and
-the `flp_int_wp` term in `MacLC.sv` — the same two files this phase edits, and
-this phase needs a fit anyway. **Detect DOS positively (`0x55AA`), never as
-"not HFS", or it write-protects the blank disk about to be formatted.**
+★★ **REVERSED 2026-09-18 (same day, later): this item was a DOS-in-DC42
+write-protect, and the ruling under it ("not supported, do what we can and
+document") rested on a premise that is FALSE.** §8.1 said the tail could not
+be written because "hps_io writes whole 512-byte blocks, so writing that
+partial block would extend the file by 428 B". It does not. Read from Main
+itself, not remembered (`../Main_MiSTer/user_io.cpp:3502-3514`, upstream
+Sorgelig code from 2021, `4af0d026`/`173d23dd`, so every stock MiSTer runs
+it):
 
-★ **Scope ruling, owner, 2026-09-18:** a DOS-formatted DC42 is extremely rare
-if it exists at all. We do what we can to prevent writing to one, and we
-DOCUMENT the limit; we do not chase completeness. Concretely: the lock is
-latched at MOUNT, so a DOS Erase of an HFS or blank DC42 performed in-session
-is NOT protected until the next remount (the format writes boot sector, FAT
-and root directory, none of which touch the refused final block; the exposure
-is a later file landing in the last cluster, refused whole and counted in
-`dbg_refused`). That in-session window is ACCEPTED and goes in the user-facing
-note alongside the "DOS in DC42 is unsupported" line. Latching the boot
-signature from the committer's own sector-0 write would close it and is not
-worth a second path.
+```c
+uint64_t size = sd_image[disk].size / blksz;      // 1,474,644 / 512 = 2880
+if (sz && lba <= size)                            // lba 2880 is ALLOWED
+    if (FileSeek(...))
+        if (!sd_image_cangrow[disk]) {
+            __off64_t rem = sd_image[disk].size - sd_image[disk].offset;
+            sz = (rem >= sz) ? sz : (int)rem;     // CLIPPED to the file: 84 B
+        }
+        if (sz) FileWriteAdv(...);
+```
+
+`sd_image_cangrow` is set only by `user_io_file_mount(..., pre != 0)`, the
+pre-create path a core uses to have Main make a save file of a given size;
+an OSD mount of an existing image passes 0. **So Main writes the partial
+block clipped to the file's real end and the file never grows.** On the read
+side `FileReadAdv` (`file_io.cpp:693`) returns the short count — 84, truthy,
+so the block is "done" — with the rest of Main's buffer left as it was.
+The refusal is therefore entirely OURS, in two places, and both are small:
+
+1. **`rtl/floppy_loader.v:199`** — `sec_total <= img_size[40:9]` is FLOOR.
+   Make it CEIL: `img_size[40:9] + (img_size[8:0] != 0)`. The extra block
+   carries the tail (84 bytes tagless, 340 tagged) and 428/172 bytes of
+   Main's stale buffer, which the drain writes past the payload end in
+   SDRAM. ★ Check the region has that slack against `sdram` map limits
+   before relying on it (a tagged 1.44 MB payload, 1,509,120 bytes, is
+   already the largest thing the region holds, and 1,474,560 + 428 is well
+   under it — verify, do not assume).
+2. **`rtl/floppy_sd_writer.v:200`** — `head_ok` refuses
+   `(q_head + 1) == file_blocks` for DC42. Accept it when the file has a
+   partial tail (`file_bytes[8:0] != 0`, a new one-bit input beside
+   `file_blocks`, derived in `MacLC.sv:2543` next to `flp_file_blocks`).
+   The writer sends its full 512-byte buffer; Main clips it. Raw images are
+   always 512-multiples, so nothing changes for them. **`head_ok`'s "both
+   blocks or neither" rule stays** — the tail block is now writable, so a
+   DC42 sector that straddles into it is written whole, the torn-state
+   argument is satisfied rather than bypassed.
+
+With both in, **DOS-in-DC42 is SUPPORTED**, the last sector of EVERY tagless
+DC42 reads back correctly for the first time (it was silently short by 84
+bytes on every mount since Phase 1 — latent for HFS, wrong for DOS), and the
+eject-time data-checksum rewrite (`floppy_sd_writer.v`, header words 36/37)
+now covers the true payload because SDRAM finally holds it. No header
+stripping, no write-protect term, no user-facing limit; the earlier idea of
+stripping the 84-byte header automatically is unnecessary and would have
+rewritten the user's file behind their back.
+
+Still rides with 6A+6B: same loader file, same fit. Gates in the list below.
 
 #### Order, and why
 
 **6A+6B+6D together, then 6C.** (Revised in review 2026-09-18: 6D was "with
 whichever fit happens first"; it now rides with 6B because the `mediaSides`
-sniff and 6D's word latches are the same loader drain, the same sector peek
-and the same fit.)
+sniff and 6D's `sec_total` change are the same loader file and the same fit.)
 
 GCR first because it is a port with a known-good donor and an unambiguous
 behavioural target, so it establishes the relay/sidedness plumbing against a
@@ -945,7 +985,10 @@ Offline, per commit:
   list above missed: `tb_floppy_track_encoder` (the relay's home file; it
   already carries the READY_GAP and `#1` edge discipline the relay bench
   should extend), `tb_mfm_write_decoder`, `tb_ism_write_engine`, and
-  `tb_floppy_loader` for the sniff as well as 6D. Note the donor has NO
+  `tb_floppy_loader` for the sniff and for 6D's tail block (assert the last
+  84 bytes of a tagless DC42 reach SDRAM), and `tb_floppy_sd_writer` for
+  6D's `head_ok` (the last DC42 sector is ACCEPTED and issues the tail block;
+  keep a mutant that still refuses it failing). Note the donor has NO
   benches at all (`../MacPlus_MiSTer/verilator/` holds no `tb_*.v`), so the
   relay has never had one: its only validation was hardware through a
   chained external drive on a Plus. The relay bench below is the first, not a
@@ -969,8 +1012,11 @@ On hardware, after a fit:
 - **Cross-encoding erase** (6C.4): an 800K image erased as DOS 720K and a
   720K image erased as Macintosh 800K must both END IN AN ERROR DIALOG, not a
   hang, and the image must be byte-identical afterwards.
-- **6D mount triple**: a DOS DC42 mounts write-protected, an HFS DC42
-  writable, a BLANK DC42 writable.
+- **6D tail gate**: fill a DOS 1.44 MB DC42 to the LAST cluster (mint it with
+  a known tail-cluster file), `scripts/fat_diff.py` byte-exact including that
+  file, `refused == 0` throughout, then remount and re-verify the tail sector
+  survived; re-run the HFS DC42 short soak because the writer changed; check
+  the DC42 header data checksum offline after eject.
 - **MFM**: format a blank 1.44 MB, then the short soak (fill / remount);
   `scripts/hfs_fork_diff.py`. Then a 720K DOS format verified with
   `scripts/fat_diff.py`.
@@ -1583,15 +1629,22 @@ field). The loss is therefore invisible to the GUEST — which believes the
 write succeeded while the sector keeps its old content — but plainly visible
 to us in any gate that reads PFSW. That is the right failure shape; it is
 still data loss, which is why the format stays unsupported.
-Not cheaply fixable: hps_io writes whole 512-byte blocks, so writing that
+~~Not cheaply fixable: hps_io writes whole 512-byte blocks, so writing that
 partial block would extend the file by 428 B and the loader's own
-`84 + dsz + tsz == size` check would then reject the image on reload.
-★ **OWNER'S RULING, 2026-09-18: DOS-in-DC42 IS NOT SUPPORTED, at EITHER size
-(720K or 1.44 MB).** So 720K and DOS gating uses RAW images only; DC42 is
-exercised at 1.44 MB with HFS, where the soak proved it safe.
+`84 + dsz + tsz == size` check would then reject the image on reload.~~
+★★ **WRONG, and RETRACTED later on 2026-09-18** — Main clips a write to the
+file's real end unless the core asked for growth (`user_io.cpp:3508-3511`,
+upstream since 2021), and no `84 + dsz + tsz == size` check exists in our
+loader (it detects DC42 by name length + magic only). The fix is two small
+edits on our side and DOS-in-DC42 becomes SUPPORTED — **see Phase 6D**, which
+supersedes the ruling and the TO DO below.
+~~★ **OWNER'S RULING, 2026-09-18: DOS-in-DC42 IS NOT SUPPORTED, at EITHER size
+(720K or 1.44 MB).**~~ **Reversed the same day once the Main source was read.**
+Until 6D lands, 720K and DOS gating uses RAW images; DC42 is exercised at
+1.44 MB with HFS, where the soak proved it safe.
 
-##### TO DO — enforce the ruling in RTL (owner: add to the plan, do NOT build
-##### it yet; 2026-09-18)
+##### ~~TO DO — enforce the ruling in RTL~~ SUPERSEDED by Phase 6D (2026-09-18):
+##### fix the tail, do not lock the disk. Kept for the record; do not build.
 
 Documentation does not protect a user. Merged means shipped here (CLAUDE.md:
 danifunker cuts releases that feed update_all, no external reviewer), and
@@ -1631,7 +1684,10 @@ on which the entire soak above was run — for no gain. Gates when it lands:
 DOS DC42 (write-protected), an HFS DC42 (writable) and a BLANK DC42
 (writable, or formatting is dead on arrival). If DOS-in-DC42 is ever to be
 supported, the fix is upstream of the writer (refuse the mount, or teach the
-loader to carry the tail), not a tweak to `file_blocks`.
+loader to carry the tail), not a tweak to `file_blocks`. ★ And that is what
+6D does: the loader carries the tail (CEIL `sec_total`) and `head_ok` admits
+the tail block because Main clips the write — not a loosening of the
+both-blocks-or-neither rule, which still holds.
 
 ★ **The tagless-DC42 tail is latent here, and that was checked, not assumed.**
 `floppy_loader.v:194` never loads the last 84 bytes of a tagless DC42's final
