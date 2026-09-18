@@ -1214,6 +1214,253 @@ HFS read control, DOS read AND write via PC Exchange — one trial each; a
 larger soak (fill the disk, remount, delete, refill) and a 720K (DD MFM) run
 are still owed before PR.
 
+### 8.1 The MFM soak — procedure (written 2026-09-18, not yet run)
+
+**What this adds over 2026-09-17.** That day proved the MFM write path works
+once. Six things it did not touch, each of which the soak does:
+
+1. **Queue pressure.** The writer's sector FIFO is 1024 deep
+   (`floppy_sd_writer.v`, `QDEPTH_BITS=10`). The GCR soak that closed Phase 4
+   was 901 sectors — never within 100 of the limit — and MFM feeds that queue
+   faster (500 kbps, 18 sectors/track). A full 1.44 MB fill is ~2 800 sectors
+   and is the first test that can reach the refusal path at all.
+2. **Whole-medium anchor coverage.** A 760 KB copy lands on low tracks. A fill
+   reaches track 79 and both sides — the first exercise of the positional
+   anchor across the entire medium. This matters out of proportion to its size
+   because **formatting writes address fields**, so an anchor that is wrong at
+   high track numbers turns the next phase from a safe failure into a
+   destructive one (§6.4).
+3. **Delete and refill — never done on MFM in any form.** Sectors written once
+   get written again (the writer's re-commit-while-queued ordering has bench
+   coverage and no hardware), allocation becomes scattered instead of bulk
+   sequential, and catalog/bitmap sectors are hit repeatedly rather than once.
+   It is also what produces **forks spanning more than three extents**, which
+   is why the gate tool had to walk the extents-overflow tree.
+4. **Guest remount on MFM.** GCR got the full write → eject → remount → launch.
+   No MFM disk this core wrote has ever been remounted.
+5. **The known end-of-write CRC hazard.** `a15242f` recorded it and
+   deliberately left it: the engine drops a pending second CRC byte if WRITE
+   is cleared between the two. One folder copy is a handful of end-of-write
+   sequences; fill/delete/refill is thousands, across far more varied driver
+   timings. This is the defect the soak is most likely to surface. **Its
+   signature is specific** — one sector bad, so exactly one file differs in
+   the fork diff, while `hfs_check` still says CONSISTENT and PFSW is clean.
+   If that is what comes back, do not go looking elsewhere first.
+6. **DC42 at 1.44 MB.** GCR was gated on raw *and* DC42; MFM has only ever
+   been written raw. The DC42 half also exercises the eject-time checksum
+   rewrite over a ~2 880-block SDRAM scan, nearly double the GCR one — and
+   that scan is what the remount-abort guard protects.
+
+**No rebuild.** The soak runs on `scratch/mfm/MacLC_4d3029a1_stage2.rbf`
+(md5 4d3029a1, STA +0.248), which already carries PISM and PFSW. If anything
+forces a refit, the single-trial results of 2026-09-17 must be re-taken first —
+they are not transferable to a new netlist.
+
+★ **There is no volatile mode** (see the session note of 2026-09-17): one OSD
+toggle drives both WRTPRT and `write_ok`, so every write lands in the user's
+file immediately. Hence the baselines below; work only on scratch copies.
+
+#### Images (minted 2026-09-18, in `C:/temp/Mac/Test disks/MFM/`)
+
+| file | size | notes |
+|---|---|---|
+| `Blank1440K.dsk` | 1 474 560 | raw; HFS `Blank1440K`, 2874 alloc blocks × 512 B, alBlSt 4, non-bootable |
+| `Blank1440K.baseline.dsk` | 1 474 560 | pristine copy — restore from this between runs |
+| `Blank1440K (DC42).dsk` | 1 474 644 | 84-byte header + payload, tagless (1440K DC42 carries no tag section) |
+| `Blank1440K (DC42).baseline.dsk` | 1 474 644 | pristine copy |
+
+★ Do not confuse `Test disks/MFM/` (these scratch SOURCES) with
+`Test disks/Written/MFM/` (RESULTS — where 2026-09-17's written `EraseMe.img`
+and its companion `mac_80mb.vhd` live). Put each run's written image in the
+second, so a later session can still tell which was which.
+
+Re-mint with `machfs` (`Volume.write(size=1474560, bootable=False)`, write in
+**binary** — see the line-endings trap) then `python scripts/mk_dc42.py
+"Blank1440K.dsk" "Blank1440K (DC42).dsk"`, which verifies its own output
+against the core's detection rule.
+
+★ **The tagless-DC42 tail is latent here, and that was checked, not assumed.**
+`floppy_loader.v:194` never loads the last 84 bytes of a tagless DC42's final
+sector and `floppy_sd_writer.v` refuses the matching block, so sector 2879's
+tail is volatile by construction. This volume's allocation area ends at byte
+1 473 536, leaving 1 024 bytes of slack, so the tail sits outside it. **A
+differently-minted image could put live data there — recheck the span if the
+image is ever re-made with other parameters.**
+
+#### Witnesses
+
+- `scripts/pfsw_probe.tcl` — `decode` (PFSW: refusals, out-of-range, flushes,
+  idle) and `decode_ism` (PISM: `wr_active`, `wr_arm`, `anchor_ok`,
+  `anchor_sector`; it flags "armed with no anchor" and "anchor off the medium"
+  itself). The JTAG chain is live; an empty read means a probes-off fit, which
+  4d3029a1 is not.
+- `scripts/parse_hud.py` — HUD rows 7 (media), 8 (SCAN-WITNESS), 9 (the ISM
+  write bits), if the HUD is wanted as a second opinion.
+- `scripts/hfs_fork_diff.py` — **the strong half of the gate** (new, 2026-09-18;
+  ported from MacPlus `e45a231` onto this repo's `hfs_check.py`). Whole-volume,
+  container-detecting, masks the File Manager's rsrc `$30..$7D` bytes.
+- `scripts/hfs_check.py` — structural consistency. **Necessary, never
+  sufficient:** it reports CONSISTENT on a volume with a corrupt sector inside
+  a file. Demonstrated 2026-09-18 — one flipped byte in a resource fork,
+  `hfs_check` CONSISTENT, `hfs_fork_diff` FAIL.
+
+#### Procedure
+
+Restore both scratch images from their baselines first. Read PFSW **before
+ejecting** (queue state) and **after ejecting** (flush) at every stage, and
+record both. Do the whole sequence on the raw image, then repeat it on the
+DC42 one.
+
+**A — fit identity and read smoke check, write toggle OFF.** Two minutes, and
+deliberately NOT a gate. The full read-regression control is already **closed
+on this exact fit** (2026-09-17: the whole System 7.5.5 Update 1 disk, 24 files
+byte-exact) and the soak does not rebuild, so there is nothing to re-gate.
+What this step is for is the mistake that actually cost an hour that day —
+running against the OLD phase4b fit by accident.
+- **Read PISM first. If it comes back empty you are on the wrong RBF**: the
+  phase4b fit has no PISM probe, and that is the fastest way to tell the two
+  apart.
+- Then mount a **POPULATED** 1.44 MB image and copy a file off it.
+  `Test disks/Written/MFM/EraseMe.img` serves — Speedometer 4.02, ~760 KB, and
+  every fork on it is extractable on the PC with `hfs_fork_diff.py` if the copy
+  needs checking.
+- ★ **Not the blank scratch image**: there is nothing on it to read. Mount that
+  one for B.
+
+**B — FILL.** Toggle write On. Copy from `boot.vhd` until the Finder refuses
+for lack of space — a disk-full dialog is the expected end of this step, not a
+failure. Use a **mix of large applications and many small files**: the large
+ones build long extents, the small ones churn catalog and bitmap sectors.
+Record what was copied. Then guest-eject.
+→ PFSW refusals 0, out-of-range 0; PISM anchor valid throughout.
+→ `hfs_fork_diff.py <written> E:/games/MacLC/boot.vhd` = PASS.
+→ `hfs_check.py <written>` = CONSISTENT.
+
+**C — REMOUNT.** Remount the written image on the MiSTer, guest-eject-first as
+always (§ media changes). The volume must mount, list, and **launch an
+application off it**. This is the half of the Phase 4 gate statement that the
+byte diff cannot give.
+
+**D — DELETE.** Delete roughly half the files, mixing large and small, and
+**empty the Trash** — on a floppy the Trash is a move, so nothing is freed
+until it is emptied. Guest-eject.
+→ PFSW clean as above.
+→ `hfs_fork_diff.py` PASS on what remains; `hfs_check.py` CONSISTENT.
+
+**E — REFILL.** Copy in a **different** set of files, into the freed and now
+fragmented space, until full again. Guest-eject.
+→ PFSW clean; fork diff PASS; `hfs_check` CONSISTENT.
+→ Expect forks spanning >3 extents by now; the gate tool compares them rather
+  than skipping them, so they must come back IDENTICAL like the rest.
+
+**F — the DC42 run.** Repeat A–E on `Blank1440K (DC42).dsk`. Additionally:
+`hfs_fork_diff.py` prints the stored vs recomputed DC42 data checksum on
+every invocation — it must read OK **after** the eject, and the only header
+words that may differ from the baseline are {36, 37} (the checksum), as in
+Phase 4.
+
+#### ★★ RESULT: THE MFM SOAK PASSED, BOTH CONTAINERS (2026-09-18, fit 4d3029a1)
+
+| phase | raw `Blank1440K.dsk` | DC42 `Blank1440K (DC42).dsk` |
+|---|---|---|
+| A fit identity + read smoke | PASS | PASS (first 1.44 MB DC42 ever mounted) |
+| B fill | PASS — 2 814/2 880 sectors, **cyl 0–79** | PASS — 2 791 sectors, **cyl 0–79** |
+| C remount + launch | PASS (Word 4.0) | PASS (Puzzle) |
+| D delete | PASS — 32 sectors, all metadata | PASS — 33 sectors, all metadata |
+| E refill | PASS — **12 extents, 9 in overflow**, byte-exact | PASS — **10 extents, 7 in overflow**, byte-exact |
+
+- **Every probe, every phase: `overflow=0`, `refused=0`, `pstate=IDLE`, PISM
+  anchor valid, `arm=0`, no alarms.** The 1024-deep queue was never stressed.
+- **Zero surviving-file sectors changed** in either delete or either refill —
+  the strongest evidence the positional anchor places sectors correctly.
+- **The >3-extent coverage arrived**: a 409 015 B resource fork shattered
+  across 12 (raw) and 10 (DC42) non-contiguous runs of a nearly-full disk
+  reassembled byte-identical both times. Predicted before each run from the
+  free-space bitmap (">=8 extents, >=5 in overflow") and met both times.
+- **DC42 specifics all clean**: header bytes changed = **{36,37} only** (the
+  checksum) out of 84, stored checksum recomputed OK at every stage, tag
+  checksum and dataSize untouched, and **sector 2879 never written** — the
+  tagless-DC42 unwritable tail stayed latent on a real full disk.
+- **`flushes` tracked ejects exactly: 4 ejects, 4 increments.** On raw it
+  correctly never moved (gated on `dc42`).
+- Two fork differences, both benign and both characterised: `INITPicker 2.01`
+  (1 byte) and `Puzzle` (42 B in 12 runs, longest 7 B — caught before/after
+  running it, so its self-modification is demonstrated, not assumed). Neither
+  is sector-shaped. See the memory note on resource-fork fingerprints. ★ The
+  gate tool was NOT loosened to excuse them: its one-byte-in-resource-data
+  mutant must keep failing, or it is blind to the defect it exists to find.
+
+Still owed before a PR: **720K DD MFM**, and **MFM formatting**.
+
+#### ★ Open item: the spontaneous eject — "UNRESOLVED, PROBABLY OK" (owner's
+#### ruling, 2026-09-18)
+
+Seen twice during the soak, on the raw disk and again on the DC42 one: a
+mounted floppy goes OFF LINE with nobody touching the mount, and the next
+access raises the guest's "please insert the diskette" prompt. Re-inserting
+fixes it and nothing is lost. Both times an application (Word 4.0) was running
+**off the floppy**, on a disk with almost no free space.
+
+What the instruments established:
+- **It is a real eject, not a media-change glitch.** On DC42 `flushes` went
+  0 -> 1 with no user eject, so a `diskEject` pulse reached the writer and the
+  header checksum was rewritten. (On RAW there is NO witness at all —
+  `flush_pending` is gated on `dc42` at `floppy_sd_writer.v:251` — which is why
+  the first occurrence could not be classified.)
+- **It fires once, not repeatedly**: 5 probes over 2 minutes held at 1.
+- **It is not spontaneous decay**: a 4-probe, 3-minute idle control with the
+  motor off and a disk mounted showed ZERO ejects and zero blocks.
+- **The symptom is textbook documented behaviour for an `_Eject` call.**
+  Inside Macintosh: Files (Volume Manipulation) — `Eject` flushes the volume,
+  places it OFF LINE and ejects it; the volume control block stays in memory;
+  a later call raises the disk switch dialog; and on re-insertion the File
+  Manager mounts the volume **and reissues the original call**. That last
+  clause predicts exactly the single block that landed the instant the disk
+  came back. Apple's own guidance is to eject "whenever your application is
+  finished with a disk" — sanctioned practice that almost never fired in 1989
+  because Word normally ran from a hard disk.
+
+★ **APPLICATION CONTROL, 2026-09-18:** the same DC42 disk, same near-full
+state, same mount, running **Puzzle** instead of Word — `flushes` did NOT move
+(held at 2), while the floppy was genuinely exercised (anchor moved, 4 blocks
+landed). A core-side phantom would not care WHICH application is running; a
+misdecoded phases-walk depends on ISM access patterns, not on who opened the
+file. One trial each, and Puzzle (13 KB, no temp files) does far less disk
+work than Word (683 KB, autosave, scratch), so it is not proof — but it moves
+"Word issued the call" from plausible to leading.
+
+What is NOT established: that WORD issued the call rather than our ISM path
+fabricating the same pulse (the phases-walk phantom-eject class, whose
+`(!ism_active || ism_sel)` qualifier predates stage 2 and has never seen MFM
+write traffic). `flushes` counts the pulse, not its origin. No Word-specific
+documentation was found — the 4.0 User's Guide is a command reference and the
+companion *Getting Started* volume is not online.
+
+★ **HOW TO SETTLE IT, when someone picks this up:** run MAME `maclc` with the
+same image and launch Word off it (`docs/mame_compare.md`). If MAME ejects
+too, it is guest software and this closes. Offline, no hardware time, no
+refit. The alternative — enabling `USE_DBG_HUD` for row 7's media witness —
+costs an authorised compile AND breaks the soak's same-fit property, so
+prefer MAME.
+
+#### Pass criteria (all of them)
+
+1. PFSW refusals 0 and out-of-range 0 at every read, both images.
+2. PISM: no "armed with no anchor", no "anchor off the medium", at any point.
+3. `hfs_fork_diff.py` PASS after B, D and E, both images.
+4. `hfs_check.py` CONSISTENT after B, D and E, both images.
+5. The guest remounts each written image and launches an application from it.
+6. DC42: data checksum recomputes OK after eject; header diff = words {36,37}.
+7. No write-error dialog in the guest that is not explained by disk-full.
+
+A refusal the guest **notices** (an error dialog) and silent corruption are
+different failures with different causes — record which one happened. And per
+the CD-attach ruling, one bad boot is not a verdict: retry before blaming the
+build.
+
+★ Afterwards, check the SD card: an unclean MiSTer shutdown sets the exFAT
+dirty bit on E: and it has recurred through this whole project.
+
 
 Design starting point is §6.1, from UK101. **The anchoring design question is
 answered.** What remains is implementation against this core's structures, plus
