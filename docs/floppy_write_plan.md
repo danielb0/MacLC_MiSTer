@@ -714,6 +714,174 @@ Port MacPlus's Phase 5 work and its six-defect review list (§7). Stress the
 structures nothing exercises incidentally: commit-queue depth, write-to-one-
 drive-while-mounting-the-other, and write-then-immediate-OSD-remount.
 
+### Phase 6 — FORMATTING (GCR *and* MFM) — the sub-project plan
+
+Written 2026-09-18, after the MFM soak and the 720K run closed. **This is the
+last item before the PR**: §1's release gate says nothing ships until every
+readable format is writable *and* formattable, and every other box is now
+ticked. It is ONE phase covering both encodings because they share the two
+hard parts — the read-side relay and the sidedness ceiling — and splitting
+them would mean building that plumbing twice.
+
+#### What is already built (the Phase 2/3 carve-outs, now cashed in)
+
+Surveyed 2026-09-18, all verified in the tree rather than assumed:
+
+| piece | state |
+|---|---|
+| GCR decoder's format reporting | **DONE** — `amark`, `amark_sector`, `fmt_mark`, `fmt_ds` all exist… |
+| …but nothing consumes them | `rtl/floppy.v:978-980` wires all three to **unconnected stubs** |
+| `decReady` (the relay's `wr_byte`) | **EXISTS** — `rtl/floppy.v:855`, the same signal MacPlus feeds the relay |
+| MFM write decoder's format support | **DONE** — `rtl/mfm_write_decoder.v:25` handles "an ID field seen in this stream, CRC-valid, not yet consumed. That is the FORMAT case", and exports `amark_*` so a caller can police a format against the head |
+| Identity-bearing staging ring, format-neutral committer | **DONE** (Phase 3 carve-outs, §1) |
+| GCR encoder relay | **MISSING** — ours is MacPlus's file minus it |
+| MFM encoder relay | **MISSING** — no equivalent has ever existed |
+| Sidedness ceiling | **MISSING** — `rtl/floppy.v:617` is still `wire doubleSidedDisk = diskSides;` with a `// TODO` |
+
+#### 6A — GCR formatting: a PORT, not a design
+
+Donor is **MacPlus master `b340c9f`** (PR #22, which merged `7712c0e`). Diffed
+2026-09-18: our `rtl/floppy_track_encoder.v` is byte-for-byte their file minus
+the relay — **78 changed lines**, and the relay is a cleanly separable block.
+
+1. **Port the relay into `floppy_track_encoder.v`** (~50 lines + 4 ports):
+   `wr_byte` / `wr_mark` / `wr_mark_sector` / `wr_end`, `SECTOR_BYTES` and the
+   per-zone `rev_len`, the `relay_armed`/`relay_sector`/`relay_ahead`
+   registers, and `STATE_GAP` which restarts the layout `relay_ahead` bytes
+   short of the written mark. Take it verbatim; do not "improve" the
+   five-bytes-behind-the-D5 arithmetic.
+2. **Wire it in `floppy.v`**, mirroring MacPlus `floppy.v:180-183`:
+   `.wr_byte(decReady)` (exists), `.wr_mark(amark)` and
+   `.wr_mark_sector(amark_sector)` — today's unconnected stubs, just filled
+   in — and `.wr_end(wrEnd)`.
+3. **Create `wrEnd`.** The one signal with no LC equivalent: a pulse when the
+   write ends and the head returns to reading. MacPlus derives it in its write
+   FSM; ours is `writeBusyReg`-based, so this is a small local addition, not a
+   port.
+
+★ **Why the relay exists at all** (§1.1 defect 1, and the reason a naive
+format fails on hardware with `fmt1Err`): the ROM requires sector 0 to be the
+FIRST address field it sees after the track is written. A free-running read
+side will present whatever sector the head happens to be over, and the format
+fails. The relay restarts the encoder's layout at wherever the format actually
+put sector 0, measured from the address mark the decoder reports.
+
+#### 6B — The sidedness ceiling
+
+One line on MacPlus (`floppy.v:202`), and it encodes a whole defect:
+
+```verilog
+wire doubleSidedDisk = drive800k && img800k && (fmtSeen ? fmtDs : mediaSides);
+```
+
+Three terms, each a ceiling on the next — **drive mechanism, then file size,
+then the medium itself**. On the LC:
+
+- `mediaSides` → exists as `dsk_int_ds` (`MacLC.sv:2338` already passes it in
+  as `diskSides`);
+- `fmtSeen` / `fmtDs` → latch from the decoder's **existing** `fmt_mark` /
+  `fmt_ds` outputs, which is precisely what those carve-out ports were for;
+- `drive800k` / `img800k` → new terms.
+
+★ **The defect this prevents** (§1.1 defect 2): the address field's format byte
+was derived from the image file's SIZE, so a One-Sided erase of an 819,200-byte
+image formatted side 0 and then advertised the disk as double-sided — letting
+the driver build an 800K volume over a side that was never formatted. Every
+3.5" diskette is one medium; 400K vs 800K is a formatting CHOICE and nothing
+on the diskette records it.
+
+★ Note the interaction with the 400K ruling: the owner ruled 400K *writes* are
+not a gate (the guest refuses MFS writes with -4, see the memory note). A 400K
+**format** is a different operation and is exactly what this ceiling governs,
+so One-Sided erase must still be exercised.
+
+#### 6C — MFM formatting: the genuinely new work
+
+Not the flux job it sounds like (§1): the LC's MFM path is BYTE-level, so a
+guest format is the CPU pushing `00 x12 / A1 A1 A1 (mark) / FE / C H R N /
+CRC-16 / 4E …` as plain bytes. The decoding half is **already done**. What is
+missing:
+
+1. **An MFM read-side relay.** `rtl/mfm_track_encoder.v` has none, and the
+   same `fmt1Err`-class failure applies: after a format the guest's next read
+   must find the sector the format just laid down. The GCR relay is the model,
+   but the arithmetic differs — MFM is 9 or 18 sectors of fixed length with no
+   track zones, so `rev_len` becomes geometry (`hd`), not a `track[6:4]`
+   lookup. Simpler than the GCR version, not a copy of it.
+2. **ISM format sequencing.** The write engine exists (`rtl/ism_write_engine.v`,
+   stage 2); what is unproven is a whole-track write driven by the Sony
+   driver's format path rather than its sector-write path. Ground-truth it
+   against MAME `swim1.cpp` as stage 2 did — **read the source, not a summary**
+   (a paraphrase had `M_MARK` backwards, §8).
+3. **Both densities.** 1.44 MB (18 spt) and 720K (9 spt). The 720K run of
+   2026-09-18 proved the anchor tracks DD geometry (readings reached 9 and
+   never exceeded it), which is the evidence that makes a DD format plausible
+   rather than hopeful.
+
+#### 6D — Riding along: the DOS-in-DC42 write-protect
+
+Specified in §8.1 and deliberately unbuilt. It touches `floppy_loader.v` and
+the `flp_int_wp` term in `MacLC.sv` — the same two files this phase edits, and
+this phase needs a fit anyway. **Detect DOS positively (`0x55AA`), never as
+"not HFS", or it write-protects the blank disk about to be formatted.**
+
+#### Order, and why
+
+**6A+6B together, then 6C, then 6D with whichever fit happens first.**
+
+GCR first because it is a port with a known-good donor and an unambiguous
+behavioural target, so it establishes the relay/sidedness plumbing against a
+reference before the novel work starts. 6B belongs with 6A because the format
+byte it depends on only becomes meaningful once a format can write one.
+
+#### Gates
+
+Offline, per commit:
+- `tb_floppy_track_decoder` (incl. `+single` for 400K), `tb_gcr_read`,
+  `tb_floppy_commit`, `tb_floppy_sd_writer`, `tb_disk_swap`,
+  `tb_mfm_write_path`, `tb_swim_ism_arm`, `tb_pds_enet` after any SDRAM edit.
+- Quartus **analysis & synthesis** as the elaboration check (catches Error
+  10028, which Icarus tolerates — CLAUDE.md).
+- ★ A **new bench for the relay**: drive a synthetic format stream into the
+  decoder and assert the encoder restarts at the written sector. This is the
+  one piece with a hardware failure mode (`fmt1Err`) that no existing bench
+  covers.
+
+On hardware, after a fit:
+- **GCR**: Erase Disk on a blank 800K, then mount/write/verify with
+  `scripts/hfs_check.py` + `scripts/hfs_fork_diff.py`; `scripts/gcr_census.py`
+  and `gcr_data_census.py` on the resulting image to check every address and
+  data field offline.
+- **One-Sided erase** of an 800K image — the sidedness-ceiling gate. The disk
+  must come back 400K, and must NOT advertise itself double-sided.
+- **MFM**: format a blank 1.44 MB, then the short soak (fill / remount);
+  `scripts/hfs_fork_diff.py`. Then a 720K DOS format verified with
+  `scripts/fat_diff.py`.
+- PFSW `overflow`/`refused` == 0 and PISM anchor valid throughout, as in §8.1.
+
+#### Risks and watch-outs
+
+- ★★ **Formatting WRITES ADDRESS FIELDS, so a positional error is the
+  DESTRUCTIVE failure mode, not the safe one** (§6.4). The 2026-09-18 soak is
+  the mitigating evidence — zero surviving-file sectors touched across two
+  deletes and two refills, and the anchor valid at every probe on both HD and
+  DD — but a format is the first operation that can make a disk unreadable
+  rather than merely wrong.
+- **There is no volatile mode** (§8.1). A format on hardware goes straight to
+  the user's file. Work on scratch copies with `.baseline` twins, as the soak
+  did.
+- **Do not re-cap the TG68 kernel or touch `sys/`** if timing tightens; §
+  CLAUDE.md. Reconcile from our side.
+- The `USE_DBG_OBSERVER` probe deck must stay ON for the dev fits (PISM/PFSW
+  are the witnesses) and be commented for the PR branch.
+
+#### Effort
+
+6A+6B is mostly transcription against a verified donor — small. 6C is real
+design work, but bounded: the decoder exists, the engine exists, and the
+relay has a worked example one directory away. The largest single unknown is
+the Sony driver's format sequence, which is a MAME question, not an RTL one.
+
 ---
 
 ## 6. LC-specific hazards
@@ -1279,6 +1447,75 @@ Re-mint with `machfs` (`Volume.write(size=1474560, bootable=False)`, write in
 "Blank1440K.dsk" "Blank1440K (DC42).dsk"`, which verifies its own output
 against the core's detection rule.
 
+★★ **A DOS FILESYSTEM IN A TAGLESS DC42 IS UNSAFE — DO NOT SUPPORT IT**
+(found 2026-09-18, by asking why a 720K DC42 would exist at all).
+`floppy_sd_writer.v`'s `file_blocks` refuses the final PARTIAL file block, so
+a tagless DC42's last 84 bytes are unwritable. That is latent for HFS, which
+reserves its final sectors — empirically confirmed: sector 2879 was never
+written in either 1.44 MB soak run, and the volume ends 1 024 B short of the
+medium. **FAT leaves no such slack.** A 720K FAT12 volume is 1 440 sectors and
+uses every one: cluster 714 covers sectors 1438–1439, so a file landing there
+cannot be written. A 1.44 MB DOS DC42 has the same defect and is the more
+plausible artifact for a user to own.
+★ **Precisely what happens, because the design is better than "truncation":**
+`head_ok` (line ~200) requires BOTH file blocks a DC42 sector touches to be
+writable, deliberately — "or the sector would land half-written, the torn
+state that reads back self-consistently". So the sector is refused WHOLE, not
+written short, and **`dbg_refused` counts it** (PFSW[23:16], the out-of-range
+field). The loss is therefore invisible to the GUEST — which believes the
+write succeeded while the sector keeps its old content — but plainly visible
+to us in any gate that reads PFSW. That is the right failure shape; it is
+still data loss, which is why the format stays unsupported.
+Not cheaply fixable: hps_io writes whole 512-byte blocks, so writing that
+partial block would extend the file by 428 B and the loader's own
+`84 + dsz + tsz == size` check would then reject the image on reload.
+★ **OWNER'S RULING, 2026-09-18: DOS-in-DC42 IS NOT SUPPORTED, at EITHER size
+(720K or 1.44 MB).** So 720K and DOS gating uses RAW images only; DC42 is
+exercised at 1.44 MB with HFS, where the soak proved it safe.
+
+##### TO DO — enforce the ruling in RTL (owner: add to the plan, do NOT build
+##### it yet; 2026-09-18)
+
+Documentation does not protect a user. Merged means shipped here (CLAUDE.md:
+danifunker cuts releases that feed update_all, no external reviewer), and
+`dbg_refused` protects US, not them. Enforcement turns an invisible corruption
+at the end of a full disk into a visible, understandable "the disk is locked".
+Roughly twenty lines:
+
+1. **`rtl/floppy_loader.v`** — two 16-bit latches off the drain loop, which
+   already computes the payload word address
+   (`wr_addr <= base_addr + (dc42 ? file_word - DC42_HDR_WORDS : file_word)`):
+   payload **word 255** (bytes 510–511, the FAT boot signature) and **word
+   512** (bytes 1024–1025, the HFS MDB signature). A comparator and a register
+   each. ★ Verify the constants against a real image rather than reasoning
+   them out: the loader's internal convention puts the EVEN byte in the HIGH
+   half (`sw_data`), so the byte order is not the obvious one.
+2. **`MacLC.sv:2576`** — one added term on
+   `assign flp_int_wp = ~status[14] || flp_int_ro;`. That is the whole
+   enforcement: the comment below it records that `write_ok` is derived from
+   `~flp_int_wp` and decided "HERE and nowhere else", so a single term reaches
+   BOTH the guest's WRTPRT and the card gate, and they cannot disagree.
+
+```
+dos_dc42 = is_dc42 && (dc42_fmt == 2 || dc42_fmt == 3)   // tagless: 720K/1440K
+                   && boot_sig == 16'h55AA               // a FAT boot sector
+                   && mdb_sig  != 16'h4244;              // and not HFS
+```
+
+★★ **DETECT DOS POSITIVELY — never infer it from "not HFS".** A blank or
+freshly formatted DC42 has no MDB yet, so a negative rule would write-protect
+precisely the disk that is about to be formatted. **MFM formatting is the very
+next work item**, so a negative rule collides with it on day one.
+
+**Do it WITH the formatting phase.** It touches the same two files, formatting
+needs a new fit anyway, and building it alone would invalidate fit 4d3029a1 —
+on which the entire soak above was run — for no gain. Gates when it lands:
+`tb_floppy_loader`, `tb_floppy_sd_writer`, Quartus A&S, and a mount test of a
+DOS DC42 (write-protected), an HFS DC42 (writable) and a BLANK DC42
+(writable, or formatting is dead on arrival). If DOS-in-DC42 is ever to be
+supported, the fix is upstream of the writer (refuse the mount, or teach the
+loader to carry the tail), not a tweak to `file_blocks`.
+
 ★ **The tagless-DC42 tail is latent here, and that was checked, not assumed.**
 `floppy_loader.v:194` never loads the last 84 bytes of a tagless DC42's final
 sector and `floppy_sd_writer.v` refuses the matching block, so sector 2879's
@@ -1390,7 +1627,47 @@ Phase 4.
   gate tool was NOT loosened to excuse them: its one-byte-in-resource-data
   mutant must keep failing, or it is blind to the defect it exists to find.
 
-Still owed before a PR: **720K DD MFM**, and **MFM formatting**.
+#### ★★ 720K DD MFM: PASSED 2026-09-18 (same fit, raw image, DOS/FAT12)
+
+720K is **DOS-only by construction**, so this used `scripts/fat_diff.py` (new)
+rather than the HFS tools, and a minted `Test disks/MFM/Blank720K.img` —
+no 720K image existed anywhere on the machine.
+
+| phase | result |
+|---|---|
+| A mount, write OFF | PASS — badged DOS, **713K free matching the FAT12 free space to the byte** |
+| B fill | PASS — 64 files, 702 KB, **1 387/1 440 sectors, cylinders 0–78**, 29 files verified byte-exact |
+| C remount + launch | PASS — Puzzle ran off it via PC Exchange |
+
+- `overflow=0`, `refused=0`, `pstate=IDLE` at every probe.
+- ★ **The anchor tracked DD geometry**: readings 3, 9, 4 — it reached 9, the DD
+  maximum, and never exceeded it, where the same day at HD it read 11, 14, 16
+  and 18. That was the main thing this phase existed to test.
+- Cylinder 79 unwritten is the FILESYSTEM, not a refusal: the fill stopped at
+  702 of 713 KB so FAT never allocated that far. On a RAW image every sector
+  including 1439 is writable — the unwritable tail was purely the DC42
+  container's partial final block.
+- The one file that differed, `INITPicker 2.01`, differs by the **same single
+  byte ($12600, 00 vs 28)** as on the 1.44 MB DC42 disk. Those two writes used
+  different data rates, geometries, filesystems AND containers, so a timing or
+  staging race cannot produce the identical byte at the identical offset — it
+  is inherited from the shared backup folder both copies came from. This
+  retroactively exonerates the DC42 run's byte as well.
+
+★ **Three defects in `fat_diff.py` found while using it, all of which would
+have produced false results** — recorded because the next person will write
+something similar: (1) `RESOURCE.FRK` and `FINDER.DAT` exist in EVERY folder,
+not just the root, so anchored `startswith` checks miss the nested ones and
+content-matching then pairs `FINDER.DAT` with any source file of the same
+length; (2) **the $30..$7D exemption DOES apply on DOS disks** — PC Exchange
+presents a DOS file as a Mac file with a resource fork, so PBOpenRF writes the
+File Manager's directory copy exactly as on HFS (measured: 8–10 bytes per
+file, all inside the window, none in data); (3) matching by NAME alone picked
+the wrong `README` and reported a difference while the real source sat in the
+length-matched set — name and length candidates must be MERGED, not tried in
+sequence.
+
+Still owed before a PR: **MFM formatting**.
 
 #### ★ Open item: the spontaneous eject — "UNRESOLVED, PROBABLY OK" (owner's
 #### ruling, 2026-09-18)
