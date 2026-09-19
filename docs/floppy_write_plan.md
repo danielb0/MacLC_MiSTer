@@ -20,9 +20,9 @@ ports over unchanged.
 
 **RELEASE GATE — owner's ruling 2026-09-15: nothing is released until every
 format is covered.** One PR, one release: GCR *and* MFM, read *and* write *and*
-format. The stage split below is INTERNAL SEQUENCING — the order we build and
-validate in — and is not a shipping plan. Do not describe it as one outside this
-repo; the maintainer has been given the finished format list, not the stages.
+format. The stage split below is INTERNAL SEQUENCING — the order the work was
+built and validated in — and is not a shipping plan; the shipped feature is the
+whole format list, not a stage of it.
 
 **Stage 1 — GCR (400K/800K).** Exact MacPlus parity, and it keeps the first
 hardware write run inside a format whose write semantics are already solved on a
@@ -2112,9 +2112,8 @@ Until 6D lands, 720K and DOS gating uses RAW images; DC42 is exercised at
 ##### ~~TO DO — enforce the ruling in RTL~~ SUPERSEDED by Phase 6D (2026-09-18):
 ##### fix the tail, do not lock the disk. Kept for the record; do not build.
 
-Documentation does not protect a user. Merged means shipped here (CLAUDE.md:
-danifunker cuts releases that feed update_all, no external reviewer), and
-`dbg_refused` protects US, not them. Enforcement turns an invisible corruption
+Documentation does not protect a user, and `dbg_refused` protects the
+developer, not them. Enforcement turns an invisible corruption
 at the end of a full disk into a visible, understandable "the disk is locked".
 Roughly twenty lines:
 
