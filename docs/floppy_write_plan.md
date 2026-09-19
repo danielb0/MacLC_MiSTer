@@ -1059,6 +1059,44 @@ On hardware, after a fit:
   timestamps aside), which is a far stronger statement of "exactly as MacPlus
   produces" than "it is valid MFS with 391 blocks" on its own.
   Image: `Phase6/P6_OneSided400K.dsk`. Same pre-7.5 System requirement.
+
+★★ **ALL THREE SIDEDNESS GATES PASS ON HARDWARE 2026-09-19**, fit `c447fbe9`,
+run under **System 7.1** (the MacPlus `mac_80mb.vhd`, vol `System 7.1 80MB`,
+77 files — a small 7.1 volume boots the LC fine; base 7.1 needs no System
+Enabler for a 1990 machine). Verified with `scripts/mfs_check.py
+--expect-alblks 391`; all three volumes MFS CONSISTENT, every VABM chain
+clean, 391 alloc blocks x 1024 B, alBlSt 16.
+
+- **Native 400K One-Sided (the control)**: `vol 'P6 One400'`, 1 file
+  (Finder's Desktop), 390 free. This is the reference.
+- **Two-Sided erase of the 400K image**: `vol 'P6 Two400'` — **28 differing
+  bytes in 409,600 against the control**, in 4 sectors (2, 4, 16, 798).
+  EVERY geometry field identical: drNmAlBlks 391, drAlBlkSiz 1024, drAlBlSt
+  16, drDirSt 4, drBlLen 12, drClpSiz 8192, drFreeBks 390, drNmFls 1,
+  drNxtFNum 2. The only MDB differences are drCrDate/drLsBkUp, 144 s apart
+  — the gap between the two erases. Sectors 2 and 798 differ by the same 7
+  bytes each (the MDB and its backup copy carrying those timestamps), 4 is
+  the directory entry's dates and 16 the Desktop fork's resource header.
+  **The clamped result is indistinguishable from the unclamped one** — which
+  is what the control was added for, and a far stronger result than "valid
+  MFS with 391 blocks".
+- **One-Sided erase of the 800K image**: `vol 'P6 OneSide'`, file still
+  **819,200 B** (hps_io cannot resize — correct). Lower 409,600 B differs
+  from the native 400K format by 140 bytes in the SAME four sectors — volume
+  name plus timestamps. Guest after a REMOUNT: **390K available**, which is
+  390 free blocks x 1024 = 399,360 B exactly, matching `mfs_check`'s
+  `free 390`; a double-sided mount would have said ~790K. The `mediaSides`
+  half of 6B holds across the remount.
+  ★ **The upper half is remnant, and "remnant" was MEASURED, not assumed:**
+  1133 `P6 ... SECnnnnnn` markers intact, 70.4% nonzero, and only 4 sectors
+  of 800 changed — 1365, 1366, 1369, 1598. Those are structures of the OLD
+  HFS volume (1598 still carries its `BD` signature and old `drNmAlBlks`
+  063a = 1594), i.e. the Finder writing a `Desktop` file on the old volume
+  when it was mounted BEFORE the erase. Corroborated exactly: mounting the
+  identically-minted `P6_Cross800K.dsk` earlier the same day changed
+  `2-3, 1365-1366, 1369, 1598`, and the upper-half subset matches sector for
+  sector. **Nothing the erase did reached above 409,600.**
+- Probes throughout: PFSW `overflow=0 refused=0`, pstate IDLE.
 - **Cross-encoding erase** (6C.4): an 800K image erased as DOS 720K and a
   720K image erased as Macintosh 800K must both END IN AN ERROR DIALOG, not a
   hang, and the failed format must not damage the image.
