@@ -53,6 +53,21 @@ Nobody else is going to run these.
       not on an ancestor and not on a rebuild. A rebuild is a different fit.
 - [ ] **The RBF in `releases/` is the binary that was gated**, copied, not
       recompiled (the build ID alone perturbs the fit).
+- [ ] ★ **The RBF is named `MacLC_YYYYMMDD.rbf` BEFORE it is pushed** — the
+      MiSTer convention, core name plus the **release** date. Never push a
+      hash name "for now" and rename it later: `releases/` feeds
+      **update_all**, so whatever name is on the file at push time is the
+      name end users receive, and `MacLC_2c6c67cd.rbf` (PR #5) shipped to
+      update_all under its internal hash name because of exactly that.
+      Fixing it afterwards is nominally the repo admin's job and in practice
+      does not happen. Hash names (the RBF's own md5 prefix) are dev handles
+      and belong in `scratch/`, never in `releases/`. Record the md5 in the
+      commit body so the provenance survives the rename, and if the branch is
+      unpushed, amend the adding commit rather than stacking an add-then-
+      rename. Watch for a collision: two fits gated on one day cannot both
+      take that date. `build_id.v` carries only `BUILD_DATE`, so a binary can
+      self-report a date one day older than its release filename — say so
+      rather than hiding it.
 - [ ] **Quartus clean**: 0 errors, timing met, and the **warning count diffed
       against the parent compile**. An unexamined jump is how MacPlus shipped a
       latch inside a combinational loop feeding its decoder's reset — it sat in
