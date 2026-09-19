@@ -1039,6 +1039,26 @@ On hardware, after a fit:
   ★★ **ALSO NEEDS A PRE-7.5 SYSTEM** (bench, 2026-09-19): the expected result
   IS an MFS volume, and 7.5.5 cannot create one — see the One-Sided gate
   above. Deferred together on 2026-09-19.
+  ★ **Verify it with `scripts/mfs_check.py`, NOT `hfs_check.py`** — this line
+  used to name the latter, which raises SystemExit on any MDB signature that
+  is not HFS's `0x4244` (`hfs_check.py:123`) while MFS's is `0xD2D7`, so the
+  named tool refused the exact thing the gate produces. `mfs_check.py`
+  (2026-09-19, ported from MacPlus `mfs_extract.py` `1009d3c`) walks every
+  fork's VABM chain with cycle and range detection; run it with
+  `--expect-alblks 391`.
+- **One-Sided erase of a 400K-sized image** — the NATIVE 400K cell, added
+  2026-09-19 when the owner asked whether it was covered. It was not, and it
+  is not mere completeness: **it is the control that makes the gate above
+  readable.** The GCR matrix is {800K, 400K} x {One-Sided, Two-Sided}; gate 1
+  is native 800K, the One-Sided-800K gate is the 800K conflict, and the
+  Two-Sided-400K gate is the 400K CONFLICT — `diskSides` is 0 for a 409,600 B
+  file so `doubleSidedDisk` (`floppy.v:1020`) clamps to single-sided whatever
+  the format asked. This cell is the same path with NOTHING TO CLAMP, file
+  and format agreeing. Run both and compare: the clamped result should be
+  structurally indistinguishable from the unclamped one (volume name and
+  timestamps aside), which is a far stronger statement of "exactly as MacPlus
+  produces" than "it is valid MFS with 391 blocks" on its own.
+  Image: `Phase6/P6_OneSided400K.dsk`. Same pre-7.5 System requirement.
 - **Cross-encoding erase** (6C.4): an 800K image erased as DOS 720K and a
   720K image erased as Macintosh 800K must both END IN AN ERROR DIALOG, not a
   hang, and the failed format must not damage the image.

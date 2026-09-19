@@ -225,10 +225,18 @@ def main():
         # half of a one-sided erase must be RECOGNISABLE remnant, not zeros.
         hfs_imgs.append(emit(out, nm, hfs_mint(vol, 819200, 0.85), a.force))
 
-    # -- gate 3: 400K target ----------------------------------------------
-    print("\n400K (gate 3 Two-Sided erase of a 400K-sized image):")
+    # -- gate 3 and its control -------------------------------------------
+    # The GCR matrix is {800K, 400K} x {One-Sided, Two-Sided}. Gate 1 is the
+    # native 800K cell and gate 2 the 800K conflict; gate 3 is the 400K
+    # CONFLICT (diskSides holds the ceiling at 0 against a Two-Sided request).
+    # The 400K NATIVE cell was missing from the plan's list -- and it is the
+    # control that makes gate 3 readable: same path with nothing to clamp, so
+    # gate 3's result should come out structurally the same as this one.
+    print("\n400K (gate 3 Two-Sided erase, + the One-Sided native control):")
     hfs_imgs.append(emit(out, "P6_TwoSided400K.dsk",
                          hfs_mint("P6 Two400", 409600, 0.70), a.force))
+    hfs_imgs.append(emit(out, "P6_OneSided400K.dsk",
+                         hfs_mint("P6 One400", 409600, 0.70), a.force))
 
     # -- gate 6a: blank 1.44 MB HFS for the MFM format gate ---------------
     print("\n1.44 MB HFS (gate 6a MFM format + short soak):")
