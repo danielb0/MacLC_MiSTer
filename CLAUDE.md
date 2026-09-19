@@ -273,10 +273,26 @@ Re-verify boot (the screenshot check above) after ANY SR change.
 
 ## Known Limitations
 
-- Floppy disks are read-only (**no write datapath exists** in `rtl/floppy.v`;
-  the drive reports `WRTPRT=0` = write-protected so the OS never tries. That
-  is load-bearing: the ROM's write primitive polls handshake b7 in an
-  UNBOUNDED loop, so an attempted write would hang the machine, not fail.)
+- **Floppies are WRITABLE as of 2026-09-19** — GCR 400K/800K and MFM
+  720K/1.44MB, raw and DC42, including guest formatting (Mac 800K and 1.44MB,
+  DOS 720K and 1.44MB, 400K MFS). Writes commit back to the user's file and
+  survive eject, remount and a power cycle.
+  ★ **The `OE` Floppy Write OSD option DEFAULTS TO OFF AND MUST STAY THAT
+  WAY.** The ROM's write primitive polls the IWM handshake b7 in an UNBOUNDED
+  loop, so the failure mode of a write bug is a HUNG MACHINE, not a failed
+  write. That is the same fact the old "read-only" bullet here called
+  load-bearing — it did not go away, it became the reason for the default.
+  `flp_int_wp` gates further: an image mounted read-only from the SD card
+  stays write-protected whatever the OSD says; a DC42 container does NOT
+  (owner's ruling 2026-09-15, plan §6.2).
+  **Floppies are BLOCK DEVICES now** — slot `S6`, loaded by
+  `rtl/floppy_loader.v` at mount — not ioctl downloads, and that is what gives
+  a write a path back to the user's file at all.
+  **There is ONE drive.** The LC has no external floppy port, so the core was
+  mounting the internal one twice (`410a064`); removing the phantom drops
+  VDNUM to 7 and with it the forked-Main requirement — see the hps_io SLOT
+  RULE above for why past slot 6 is hostile.
+  Plan, gate matrix and hardware results: `docs/floppy_write_plan.md`.
 - **BOOTING FROM FLOPPY WORKS** (user-confirmed on hardware 2026-08-05,
   bench build `78a46cf2`). The old "Welcome to Macintosh" retry loop and the
   ~39 KB-then-UNDERRUN freeze are gone. Several fixes contributed and no
