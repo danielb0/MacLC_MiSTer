@@ -1009,9 +1009,33 @@ Offline, per commit:
 
 On hardware, after a fit:
 - **GCR**: Erase Disk on a blank 800K, then mount/write/verify with
-  `scripts/hfs_check.py` + `scripts/hfs_fork_diff.py`; `scripts/gcr_census.py`
-  and `gcr_data_census.py` on the resulting image to check every address and
-  data field offline.
+  `scripts/hfs_check.py` + `scripts/hfs_fork_diff.py`.
+  ★ **NOT `gcr_census.py` / `gcr_data_census.py` — this line used to name
+  them and they CANNOT be pointed at an image** (corrected 2026-09-19).
+  Both parse the GCR byte stream captured by `verilator/tb_gcr_read.v`, and
+  `gcr_data_census` additionally requires the SELF-ADDRESSING synthetic image
+  from `gcr_gen_image.py`, so it has nothing to say about a real HFS volume.
+  The deeper reason: a `.dsk` holds DECODED SECTOR DATA, not the raw track.
+  Address fields exist only in the encoded bitstream the core generates on
+  read, so there are none in the file to census. Those two tools belong to
+  the read-path simulation work (they exonerated the GCR read datapath on
+  2026-08-05), not to a format gate.
+  **`hfs_fork_diff` is what actually answers the question the census was
+  reaching for**: if the format had put an address field in the wrong
+  position, sector data would land at the wrong offset, so files written
+  afterwards would read back wrong or the volume would fail to walk.
+  Byte-exact forks ARE the proof the address fields were right, arrived at
+  through the guest instead of through a stream capture.
+  ★★ **PASS ON HARDWARE 2026-09-19**, fit `c447fbe9`. Erased
+  `Phase6/P6_GCR_Erase800K.dsk` (which was minted 85% full, so the erase had
+  to clear 680K of known content), then copied the Microsoft Word 4.0 folder
+  onto it. `vol 'P6 Erase800'` 1594 alloc blocks x 512 B, alBlSt 4,
+  CONSISTENT. **FORK DIFF: PASS — 3 identical, 0 differ**, the only other
+  entry being the Finder's own Desktop. The load-bearing one is Microsoft
+  Word's **683,260-byte resource fork in a single 1335-block extent**: a long
+  contiguous write across most of a freshly formatted disk, read back
+  byte-identical (2 bytes in the `$30-$7D` window, resource DATA exact).
+  PFSW `overflow=0 refused=0`, pstate IDLE.
 - **One-Sided erase** of an 800K image — the sidedness-ceiling gate. The disk
   must come back 400K, and must NOT advertise itself double-sided — **across a
   remount** (that is the `mediaSides` half of 6B). Byte-diff the first
