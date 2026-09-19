@@ -1088,6 +1088,42 @@ On hardware, after a fit:
   file, `refused == 0` throughout, then remount and re-verify the tail sector
   survived; re-run the HFS DC42 short soak because the writer changed; check
   the DC42 header data checksum offline after eject.
+  ★★ **PASS ON HARDWARE 2026-09-19, fit `c447fbe9` — BOTH HALVES OF 6D.**
+  Images: `Phase6/P6_DOS1440_tail (DC42).img` (TAIL.BIN pinned to cluster
+  2848) and `..._fill (DC42).img` (empty), `scripts/mint_phase6_images.py`.
+  - **6D.1, the loader CEIL** — TAIL.BIN copied off to SCSI and compared
+    byte-for-byte: exact, including the 84-byte signature. Those bytes are
+    the ones no pre-6D build could load (the old FLOOR gave 2880 blocks =
+    file bytes 0..1,474,559, which after the 84-byte header stops at payload
+    byte 1,474,475). Its `TEXT/dosa` type confirms it came off the FAT12
+    DC42 and not from elsewhere.
+  - **6D.2, the writer's partial-tail acceptance** — needed a disk filled to
+    ZERO free clusters; at "5K free" the 9 remaining clusters were the TOP
+    ones and the tail was never touched. ★ Note for a re-run: a fill that
+    stops "nearly full" does NOT exercise this, and neither does the
+    pre-placed TAIL.BIN (the minter writes that on the PC; the core only
+    reads it). Filled to 0 free: cluster 2848 = sector 2879 allocated
+    `0xFFF`, and file bytes 1,474,560..1,474,643 — the partial block — went
+    from all-zero to 22 changed bytes of COHERENT data (a readable `vers`
+    resource, `7.1#7.1, (c) Apple`), with sector 2879 carrying 425 nonzero
+    bytes of real text. First time this core has ever written those 84 bytes.
+  - **The file did not grow**: 1,474,644 B in, 1,474,644 B out. That is the
+    premise 6D was reversed on, now confirmed on hardware — Main clips the
+    partial write to EOF, so `head_ok`'s "both blocks or neither" rule passes
+    sector 2879 through as two blocks and the writer's full 512-byte buffer
+    is truncated host-side.
+  - Throughout: PFSW `overflow=0 refused=0`, `flushes=3`, pstate IDLE; PISM
+    idle with a valid anchor. DC42 data checksums `bf80c6bc` / `3a570712`,
+    stored == recomputed — and they now cover the true payload.
+  - 32 comparable files byte-identical against the 2026-09-18 soak volume.
+    `INITPicker 2.01` differed by 7 bytes (6 in the `$30-$7D` window, 1 at
+    fork offset `$12600`) — fingerprints 1 and 3 of the resource-fork note,
+    the SAME byte as 2026-09-18 and in the same direction; both DC42 copies
+    came via the backup folder while the raw copy came from `boot.vhd`, so
+    that is the copy chain, not the DC42 path.
+  ★ `fat_diff.py` reports FAIL when the target holds a file the source lacks
+  — comparing against the soak volume flags TAIL.BIN that way. Read the
+  per-file lines, not the headline, when the source is not the true origin.
 - **MFM**: format a blank 1.44 MB, then the short soak (fill / remount);
   `scripts/hfs_fork_diff.py`. Then a 720K DOS format verified with
   `scripts/fat_diff.py`.
