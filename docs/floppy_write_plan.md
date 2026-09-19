@@ -1126,7 +1126,43 @@ On hardware, after a fit:
   per-file lines, not the headline, when the source is not the true origin.
 - **MFM**: format a blank 1.44 MB, then the short soak (fill / remount);
   `scripts/hfs_fork_diff.py`. Then a 720K DOS format verified with
-  `scripts/fat_diff.py`.
+  `scripts/fat_diff.py`. ★ **AND a DOS 1.44 MB format** — this list asked
+  only for 720K DOS and that was a GAP (spotted at the bench 2026-09-19).
+  The combinations that physically exist are a 2x2 with one impossible cell:
+  HD+HFS = Mac 1.44, HD+FAT = **DOS 1.44**, DD+FAT = DOS 720K, and DD+HFS
+  does not exist because the Mac formats DD media as 800K GCR (section 8).
+  DOS 1.44 is not redundant with either of the others: the DOS path is
+  driven by **PC Exchange** (its formatter stamps OEM `PCX 2.0` in the boot
+  sector) while the Mac path goes through the Disk Initialization package,
+  so DOS 1.44 is PC Exchange's formatter at HD density — a pairing neither
+  other run exercises.
+  ★★ **ALL THREE PASS ON HARDWARE 2026-09-19, fit `c447fbe9`.**
+  - **Mac 1.44 (6a)**: `vol 'P6 MFM1440'` 2874 alloc blocks x 512 B,
+    alBlSt 4, CONSISTENT; 2839/2880 sectors rewritten. Soak: 34 files
+    copied back, volume CONSISTENT, 32 files fork-identical, only
+    `INITPicker 2.01` differing by 4 bytes (3 in the `$30-$7D` window, 1 at
+    `$12600` — the same byte and direction as 2026-09-18, and the source
+    folder is literally named `Soak files backup`, which is exactly the
+    provenance the resource-fork note pins it on).
+  - **DOS 720K (6b)**: 1440 sectors, 2 spc, 2 FATs x 3, 112 root, **9 spt**,
+    2 heads, media `0xF9`; 1430/1440 rewritten.
+  - **DOS 1.44 (6c)**: 2880 sectors, 1 spc, 2 FATs x 9, 224 root, **18 spt**,
+    2 heads, media `0xF0`; 2853/2880 rewritten, last sector 2879 included.
+  - ★ **THE EVIDENCE THAT THE FORMAT REACHED THE SURFACE IS THE `0xF6`
+    FILLER**, not the fact that the volume mounts. `0xF6` is the standard
+    IBM/MFM data-field filler written during a low-level format, and it
+    covers essentially every free sector on all three disks (2810 / 1410 /
+    2835). A filesystem merely written over the old surface would leave the
+    previous contents in the free area; these disks do not. Check this on
+    any future format gate — it distinguishes "formatted" from "a new
+    directory written on stale media" in one command.
+  - Probes on all three: PFSW `overflow=0 refused=0`, pstate IDLE; PISM
+    idle, arm=0, anchor valid. ★ `flushes` did NOT advance on the raw-image
+    runs while it advanced on each DC42 eject — correct, not a miss: the
+    eject flush exists to rewrite the DC42 header checksum (words 36/37)
+    and a raw `.dsk` has no such header.
+  - **No MFM read-side relay was needed** (6C.0's open question): the write
+    side laid down complete, correctly-paced tracks at both densities.
 - PFSW `overflow`/`refused` == 0 and PISM anchor valid throughout, as in §8.1.
 
 #### Risks and watch-outs
