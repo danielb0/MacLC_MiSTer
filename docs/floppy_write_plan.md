@@ -981,6 +981,11 @@ Offline, per commit:
 - `tb_floppy_track_decoder` (incl. `+single` for 400K), `tb_gcr_read`,
   `tb_floppy_commit`, `tb_floppy_sd_writer`, `tb_disk_swap`,
   `tb_mfm_write_path`, `tb_swim_ism_arm`, `tb_pds_enet` after any SDRAM edit.
+  ★ Added 2026-09-19: **`tb_mfm_format`** (38 checks) after ANY edit to
+  `mfm_write_decoder.v`, `ism_write_engine.v`, `mfm_track_encoder.v` or
+  `swim.v`'s ISM write path — it is the only bench that drives a whole track
+  through the real CPU bus, and the only one that covers a reformat with a
+  live anchor.
 - ★ Added in review 2026-09-18, benches for files this phase EDITS that the
   list above missed: `tb_floppy_track_encoder` (the relay's home file; it
   already carries the READY_GAP and `#1` edge discipline the relay bench
@@ -1139,8 +1144,106 @@ different `spt` than the drive.
 
 **What is NOT done:** none of it has been on hardware. The Phase 6 hardware
 gates above are all still open — GCR Erase, the One-Sided erase across a
-remount, the 6D tail gate, the DC42 short soak re-run — and 6C (MFM
-formatting) has not been started.
+remount, the 6D tail gate, the DC42 short soak re-run.
+
+#### ★★ 6C: MFM FORMATTING ALREADY WORKED — 2026-09-19, NO RTL CHANGE
+
+★ **The headline: a whole-track MFM format needed no new RTL.** This section
+was written before `rtl/mfm_write_decoder.v` existed; by the time it came to
+be built, Stage 2 had already supplied every piece. The decoder's priority-1
+path ("an ID field seen in this stream, CRC-valid, not yet consumed — that is
+the FORMAT case") places each sector from the ID the guest itself just wrote;
+`rtl/ism_write_engine.v` is format-agnostic (it streams bytes and knows
+nothing of fields); and the committer mux was already there. What was missing
+was **evidence**, so 6C is delivered as one new bench and a design decision,
+not as a patch.
+
+**`verilator/tb_mfm_format.v` — 38 checks, PASS.** A whole track written the
+way the guest writes one: over the real CPU bus, through `swim.v`'s register
+file, FIFO and handshake, `ism_write_engine`, `floppy.v`, the MFM decoder and
+the committer. The bench supplies only the CPU, an SDRAM model and the track
+bytes. ★ Those bytes are **built in the bench from the MAME pc_dsk tuple, not
+taken from `mfm_track_encoder.v`** — sourcing the write side from the read
+side's encoder would test the decoder against its own inverse twice and hide
+any disagreement about what a real IBM track is.
+
+| section | what it establishes |
+|---|---|
+| 1 | HD 18 spt: 18 ID+DATA pairs back to back — 18 commits, in order, each at its own byte offset, payload byte-exact, 0 rejects |
+| 2 | **no anchor was available at any point** (`ism_anchor_ok` never rose), so every sector was placed by its own in-stream ID |
+| 3 | the write ends the way a real one does: the starved engine raises 0x01 and clears ACTION itself |
+| 4 | DD 9 spt: the same at the 720K geometry (6C.3) |
+| 5 | cross-encoding: an MFM write to a GCR-mounted disk commits nothing and reaches SDRAM not at all (6C.4, image-safety half) |
+| 6 | **REFORMAT: a stale anchor must not steer the format** |
+
+★ **§6 is the one that was missing from every earlier plan draft.** §1 and §4
+format with no anchor, which is what an *unformatted* disk gives you. Erasing
+a disk that already holds a volume does not: the driver reads it first, and
+the anchor **survives the switch to write mode by design** — `swim.v:1247`
+clears it only on a READ-ARM rising edge. A decoder that preferred the anchor
+over the in-stream ID would stack all eighteen sectors on one block, and the
+disk would come back with one good sector and seventeen holes. Reformatting
+an already-formatted disk is the *common* case, so this is not an edge.
+
+**Mutation-tested**, and the two cases fail differently, which is the point:
+
+| mutant | §1/§4 | §6 |
+|---|---|---|
+| decoder ignores the in-stream ID (anchor only) | 0 accepted, **18 rejected** | 18 commits, **all at the anchor's block** — wrong addresses, missing payload |
+| an ID is never consumed (`id_armed` not cleared) | survives — every data field in a format has its own ID immediately before it | survives |
+
+The second mutant surviving is correct division of labour, not a gap: it is
+only observable when a data field arrives with NO preceding ID, which is
+`tb_mfm_write_decoder` §8 — and it fails there (2 failures). Do not "fix" it
+by adding a case here.
+
+#### 6C.0 — THE RELAY DECISION: **NO MFM RELAY. Skipped deliberately.**
+
+Step 0 asked whether an MFM read-side relay is needed. The MAME runtime run
+it specifies is **not available on the Windows dev host** (the tooling in
+`verilator/mame/` targets the macOS box — `/opt/homebrew/bin/mame`,
+`/private/tmp/goodroms`). Decided on the other evidence instead, and the
+argument is strong enough to record rather than defer:
+
+1. **`fmt1Err` is a GCR-only convention.** The GCR relay exists because the
+   ROM requires sector 0 to be the first address field after the format. IBM
+   MFM has no such rule: every sector self-identifies in its ID field
+   (`C H R N`), so the driver locates any sector by searching for it.
+2. **The MFM verify is a WHOLE-TRACK READ** with a 73-attempt budget
+   (`a6e966` → `a6f308`, `docs/sony_driver_mfm_read_reference.md` §1). A
+   whole-track read that budgets 73 attempts is by construction indifferent
+   to where the head happens to be.
+3. ★★ **A relay would actively endanger a working path.** The MFM encoder's
+   `oindex` is positional — high during gap 4a, once per revolution — and
+   `rtl/mfm_track_encoder.v`'s own header records that **"the driver verifies
+   drive speed via the index period, so the preamble length is load-bearing,
+   not cosmetic"**. A relay restarts the layout mid-revolution, which emits a
+   short index period. The MAME capture has the driver polling that sense 7 M
+   times per session. So an unnecessary relay does not merely fail to help:
+   it can break the drive-speed check on the HW-validated 1.44 MB and 720K
+   READ paths.
+
+**The risk is asymmetric and that decides it.** Building a relay we do not
+need can break working reads; not building one costs, at worst, a `-84
+verErr` at the hardware gate — non-destructive, diagnosable, and with a
+known remedy. `swim.v` already exports `mfm_wr_active` for a `wr_end`, and
+it is deliberately left unconsumed: adding a dangling net in `floppy.v` now
+would buy nothing.
+
+★ **If the MFM format gate DOES fail on hardware**, in this order: (a) confirm
+it is `-84` from the verify and not an underrun or a `$142` code from
+somewhere else; (b) run step 0's MAME experiment on the macOS box to get the
+driver's own gap3 and revolution length — **a relay's `rev_len` must be the
+DRIVER's, not the encoder's 12,422**, since the driver's gaps need not match
+`pc_dsk`; (c) only then build it, and re-gate the MFM READ path (the soak and
+the 720K run) afterwards, not just the format.
+
+**Still open for 6C, and they are hardware questions, not RTL ones:** format
+a blank 1.44 MB and a 720K DOS disk on the bench, then the short soak; and
+the cross-encoding GUEST behaviour — both directions must ERROR, not hang.
+The reverse direction of §5 (a GCR write to an MFM-mounted disk) rests on the
+same single `wrIsMfm` mux read the other way and is not separately benched;
+a defect in that ternary would break every MFM test above.
 
 ---
 
