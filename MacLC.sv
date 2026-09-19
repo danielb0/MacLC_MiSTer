@@ -85,7 +85,9 @@ module emu
 		// write primitive polls the IWM handshake in an UNBOUNDED loop, so the
 		// failure mode of a write bug here is a HUNG machine, not a failed write.
 		// Bit clear (0) = first entry = Off. Gated further in flp_int_wp below --
-		// a read-only mount or a DC42 stays write-protected whatever this says.
+		// a read-only mount stays write-protected whatever this says. A DC42
+		// does NOT: there is no container term (owner's ruling 2026-09-15,
+		// plan section 6.2) -- see the flp_int_wp comment.
 		"OE,Floppy Write,Off,On;",
 		"-;",
 		"SC0,IMGVHDHDA,Mount SCSI-0;",
