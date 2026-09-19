@@ -96,6 +96,9 @@ module tb_swim_ism_arm;
    reg [15:0] dataIn     = 16'd0;
    reg  [3:0] addr       = 4'd0;
    wire [15:0] dataOut;
+   // The internal disk's encoding. MFM for sections 1-6; section 7 flips it to
+   // GCR to put the SWIM in the state the Phase 6 gate 4a probe found.
+   reg  [1:0] diskMFM = 2'b01;
 
    wire [21:0] dskReadAddrInt, dskReadAddrExt;
    wire  [7:0] dskReadData = dskReadAddrInt[7:0] ^ dskReadAddrInt[15:8];
@@ -115,6 +118,7 @@ module tb_swim_ism_arm;
    // adding a pass-through parameter to swim.v for test convenience only.
    defparam dut.floppyInt.MFM_PERIOD_HD = 9'd15;
    defparam dut.floppyInt.MFM_PERIOD_DD = 9'd31;
+   defparam dut.WR_VOID_PERIOD = 9'd31;            // section 7's void cadence
 
    swim dut (
       .clk(clk), .cep(cep), .cen(cen), ._reset(_reset),
@@ -122,7 +126,7 @@ module tb_swim_ism_arm;
       .dataIn(dataIn), .cpuAddrRegHi(addr), .dataOut(dataOut),
       .SEL(1'b0), .driveSel(1'b0),
       .insertDisk(2'b01),        // internal drive only
-      .diskSides(2'b11), .mediaSides(2'b11), .diskMFM(2'b01), .diskHD(2'b01),
+      .diskSides(2'b11), .mediaSides(2'b11), .diskMFM(diskMFM), .diskHD(2'b01),
       .writeProtect(2'b10),      // internal drive writable, external locked
       .dskReadAddrInt(dskReadAddrInt), .dskReadAckInt(1'b1),
       .dskReadAddrExt(dskReadAddrExt), .dskReadAckExt(1'b1),
@@ -362,6 +366,70 @@ module tb_swim_ism_arm;
       check(rd[0] === 1'b1, "error bit 0 (0x01) is the write-underrun code");
       cpu_read(4'h2);
       check(rd[0] === 1'b0, "and reading the error register clears it");
+
+      // ─── 7. ★ a NON-MFM disk under an MFM write: the engine still drains
+      // Phase 6 gate 4a (2026-09-19, fit c447fbe9): an 800K GCR image erased
+      // as DOS 720K HUNG the machine. The file size pins the encoding, so
+      // mfm_disk is 0, floppy.v's MFM byte timer never runs, the engine never
+      // pops, and the ROM's format loop at $A6F130 - `move.b (a4),d0 / bpl`
+      // on Handshake b7, which tests FIFO SPACE and nothing else - polls
+      // forever against the two gap bytes it primed. Raising an underrun
+      // would not help: that clears ACTION but leaves the FIFO full, so b7
+      // stays 0 (section 6 ends in exactly that state). The engine must keep
+      // POPPING at the byte cadence with no medium behind it; nothing can
+      // commit because floppy.v's wrIsMfm mux only takes MFM sectors for an
+      // MFM file, and the ROM's own 13,500-byte wait-for-index timeout then
+      // ends the format with an error instead of a hang.
+      $display("7. a write over a non-MFM disk drains the FIFO into the void (gate 4a)");
+      diskMFM = 2'b00;                   // the internal file is 819,200 B: GCR
+      repeat (40) @(posedge clk);
+      mode_set(8'h01);                   // clear FIFO
+      mode_clear(8'h01);
+      cpu_read(4'h2);                    // clear the sticky error
+      check(dut.floppyInt.mfm_spinning === 1'b0,
+            "the MFM read path is parked: this disk is not MFM");
+      // the ROM's format prologue: prime two gap bytes, then ACTION+WRITE
+      cpu_write(4'h0, 8'h4E);
+      cpu_write(4'h0, 8'h4E);
+      mode_set(8'h18);
+      repeat (20) @(posedge clk);
+      check(dut.ism_write_active === 1'b1,
+            "armed with the FIFO full - the state the hardware probe found");
+      n_commit = 0; n_wr_bytes = 0; n_pop = 0; n_tick = 0; n_sv = 0; n_rej = 0;
+      n_unr = 0; push_polls = 0; push_giveups = 0; err_ovf = 0;
+      // the ROM's gap loop: poll b7, push $4E, repeat (it allows 13,500)
+      for (i = 0; i < 60; i = i + 1) fifo_push(4'h0, 8'h4E);
+      check(push_giveups == 0,
+            "Handshake b7 comes back every byte - the ROM's bpl loop is released");
+      check(push_polls > 0, "and the guest is paced, not free-running");
+      check(n_pop >= 60, "every gap byte was popped by the engine");
+      check(n_unr == 0, "with no underrun while the guest keeps up");
+      // then a whole data field, as the format's sector pass would write it:
+      // the decoder must ACCEPT it and the commit mux must REFUSE it
+      for (i = 0; i < 12; i = i + 1) fifo_push(4'h0, 8'h00);
+      for (i = 0; i < 3;  i = i + 1) fifo_push(4'h1, 8'hA1);
+      fifo_push(4'h0, 8'hFB);
+      for (i = 0; i < 512; i = i + 1) fifo_push(4'h0, i[7:0] ^ 8'hC3);
+      fifo_push(4'h2, 8'h00);
+      repeat (6000) @(posedge clk);
+      $display("   (bytes to medium: %0d, decoder accepted: %0d, committed: %0d)",
+               n_wr_bytes, n_sv, n_commit);
+      check(push_giveups == 0, "the field went out at the byte cadence too");
+      check(n_sv >= 1, "the MFM decoder saw a complete field");
+      check(n_commit == 0, "and NOTHING committed: the image is not MFM");
+      check(dut.floppyInt.mfm_spinning === 1'b0,
+            "the read path stayed parked throughout");
+      // the FIFO is empty again: the engine stops itself exactly as it does
+      // over an MFM disk (the ROM's exit clears ACTION anyway)
+      repeat (2000) @(posedge clk);
+      check(n_unr >= 1 && dut.ism_mode_reg[3] === 1'b0,
+            "starved, it disarms itself as section 6 showed");
+      cpu_read(4'h2);
+      mode_clear(8'h18);
+      diskMFM = 2'b01;
+      repeat (40) @(posedge clk);
+      check(dut.ism_write_active === 1'b0 && n_unr >= 1,
+            "back to an MFM disk, disarmed, nothing left ticking");
 
       $display("");
       $display("tb_swim_ism_arm: %0d checks, %0d failures", checks, fails);

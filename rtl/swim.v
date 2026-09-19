@@ -55,6 +55,13 @@
 */
 
 module swim
+#(
+	// The void write cadence in cep ticks: 259 = 32 us, the DD byte time
+	// (= floppy.v MFM_PERIOD_DD). A parameter only so a bench can shrink it,
+	// exactly as floppy.v's MFM_PERIOD_* are; no synthesised instance
+	// overrides it.
+	parameter [8:0] WR_VOID_PERIOD = 9'd259
+)
 (
 	input clk,
 	input cep,
@@ -536,7 +543,46 @@ module swim
 	// times per byte time and write every byte four times over.
 	reg  ism_wr_stb_d;
 	always @(posedge clk) ism_wr_stb_d <= mfm_stb_sel;
-	wire ism_wr_tick = ism_write_active && mfm_stb_sel && !ism_wr_stb_d;
+
+	// ★ THE VOID CADENCE (Phase 6 gate 4a, 2026-09-19). floppy.v's byte timer
+	// runs only while `mfm_spinning`, and that term needs `mfm_disk`. An
+	// 819,200-byte image is GCR by size, so when the guest erases it as DOS
+	// 720K the driver arms this engine over a disk whose timer never runs:
+	// no tick, no pop, and the ROM's format loop at $A6F130 polls Handshake
+	// b7 (FIFO SPACE - it tests nothing else) forever against the two gap
+	// bytes it primed. That is a hard hang, seen on hardware (fit c447fbe9).
+	// An underrun is NOT the answer: it clears ACTION but leaves the FIFO
+	// full, so b7 stays 0 and the poll never exits (tb_swim_ism_arm §6 ends
+	// in exactly that state). The engine has to keep POPPING at the byte
+	// cadence with no medium behind it, as a real drive keeps turning under
+	// a write the media does not take: nothing commits, because floppy.v's
+	// wrIsMfm mux only takes MFM sectors for an MFM file, and the ROM's own
+	// 13,500-byte wait-for-index timeout ends the erase with an error - the
+	// mirror of the 720K-erased-as-800K direction, which fails its verify
+	// for the same reason. So: when the SELECTED drive's disk is not MFM, a
+	// local timer at the DD cadence (a GCR disk is DD media) paces the
+	// engine instead. The two sources are exclusive by diskMFM, so an MFM
+	// disk is never double-ticked. Proven by tb_swim_ism_arm §7, which
+	// reproduces the hang against the RTL without this block.
+	wire ism_sel_mfm = ism_devsel_ext ? diskMFM[1] : diskMFM[0];
+	wire ism_void    = ism_write_active && !ism_sel_mfm;
+	reg  [8:0] ism_void_timer;
+	reg        ism_void_tick;
+	always @(posedge clk) begin
+		ism_void_tick <= 1'b0;
+		if (!ism_void)
+			ism_void_timer <= WR_VOID_PERIOD;
+		else if (cep) begin
+			if (ism_void_timer != 9'd0)
+				ism_void_timer <= ism_void_timer - 9'd1;
+			else begin
+				ism_void_timer <= WR_VOID_PERIOD;
+				ism_void_tick  <= 1'b1;
+			end
+		end
+	end
+	wire ism_wr_tick = ism_write_active &&
+	                   ((mfm_stb_sel && !ism_wr_stb_d) || ism_void_tick);
 
 	wire        ism_wr_pop;
 	wire        ism_wr_underrun;

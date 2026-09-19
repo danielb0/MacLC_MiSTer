@@ -110,6 +110,7 @@ module tb_mfm_format;
 
    defparam dut.floppyInt.MFM_PERIOD_HD = 9'd15;
    defparam dut.floppyInt.MFM_PERIOD_DD = 9'd31;
+   defparam dut.WR_VOID_PERIOD = 9'd31;            // section 5's void cadence
 
    swim dut (
       .clk(clk), .cep(cep), .cen(cen), ._reset(_reset),
@@ -383,10 +384,16 @@ module tb_mfm_format;
       repeat (20) @(posedge clk);
       n_commit = 0; n_rej = 0; stray = 0; push_giveups = 0;
       arm_for_write(1'b1);
-      // A SHORT burst, not a whole sector: with mfm_disk low the medium is
-      // not spinning for the ISM, so the engine never consumes and every push
-      // past the second one gives up on the b7 poll. Two dozen bytes prove
-      // the point; 682 would just be 682 give-ups.
+      // A SHORT burst, not a whole sector: the commit mux is what is under
+      // test, and an ID field is enough to show it refusing.
+      // ★ REVISED 2026-09-19 (gate 4a). This section used to ASSERT that the
+      // engine never consumed here ("the guest's pushes backed up, as
+      // expected") - that was the hang. On hardware the ROM's format loop
+      // polls Handshake b7 alone, so an engine that does not pop is a machine
+      // that never comes back. swim.v now paces the engine from its own void
+      // cadence when the selected disk is not MFM, so the guest is released
+      // every byte while the mux still commits nothing. tb_swim_ism_arm §7
+      // is the full version; here the burst must simply go out at cadence.
       for (i = 0; i < 12; i = i + 1) fifo_push(4'h0, 8'h00);
       for (i = 0; i < 3;  i = i + 1) fifo_push(4'h1, 8'hA1);
       fifo_push(4'h0, 8'hFE);
@@ -396,8 +403,8 @@ module tb_mfm_format;
       repeat (20000) @(posedge clk);
       check(n_commit == 0, "nothing may commit through the GCR mux");
       check(stray == 0, "and nothing may reach SDRAM at all");
-      check(push_giveups > 0,
-            "the engine never consumed: the guest's pushes backed up, as expected");
+      check(push_giveups == 0,
+            "and the engine consumed every byte: the guest is never left polling b7");
 
       // ─── 6. REFORMAT: a stale anchor must not steer the format ──────────
       // ★ THE COMMON CASE ON REAL HARDWARE, and the one nothing covered.

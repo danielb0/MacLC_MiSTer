@@ -904,6 +904,11 @@ missing:
    hardware gate: both directions must error out, not hang. If one hangs,
    the fix is upstream (refuse at the driver's density sense), never a
    change to which decoder commits.
+   ★ RESOLVED 2026-09-19: 800K-as-720K DID hang (gate 4a below), and
+   neither "refuse at the density sense" nor "raise an underrun at the
+   write arm" is the fix - see the gate 4a result for why. The engine now
+   keeps its byte cadence over a non-MFM disk (`swim.v` `WR_VOID_PERIOD`),
+   the guest's write goes into the void, and the ROM's own timeout errors.
 
 #### 6D — Riding along: the DC42 partial final block — FIX IT, not lock it
 
@@ -1165,6 +1170,49 @@ clean, 391 alloc blocks x 1024 B, alBlSt 16.
     underrun/error the driver already handles. That still refuses on
     density, changes neither which decoder commits nor the drive ID, and
     turns the hang into the error the gate asks for.
+  - ★★ **CORRECTED, same day: the write-arm underrun would NOT have
+    released the guest either.** `releases/boot0.rom` disassembled at the
+    probed PC: the loop at `$A6F130` is `move.b (a4),d0 / bpl.b` on ISM
+    Handshake (`$F17E00` = reg 7). It tests b7 - FIFO SPACE - and nothing
+    else: not b5 (error), not the mode register; the `dbra d3` (#$34BC =
+    13,500) bounds BYTES pushed, not polls. An underrun clears ACTION but
+    leaves the two primed `$4E` bytes in the FIFO, so b7 stays 0 and the
+    poll never exits - the state `tb_swim_ism_arm` §6 ends in, and the
+    hang its own arm-edge comment describes. **THE FIX (swim.v, "the void
+    cadence"):** when the SELECTED drive's disk is not MFM, a local timer
+    at the DD byte time (`WR_VOID_PERIOD` = 259 cep = 32 us) paces the
+    engine instead of `floppy.v`'s `mfm_stb`, which needs `mfm_spinning`
+    and so `mfm_disk`. The engine pops every byte-time, b7 returns every
+    byte, the ROM writes its gap into the void, and after 13,500 bytes
+    (~0.43 s) with no index pulse its own timeout takes the error exit
+    (`bra $a6f2ec`). Nothing commits: `wrIsMfm` = 0 keeps the MFM decoder
+    off the committer, exactly as before. The two tick sources are
+    exclusive by `diskMFM`, so an MFM disk is never double-ticked. This is
+    the mirror of 4b, where the GCR byte clock never depended on the disk
+    type and the write into the void failed at its verify.
+    Benches: `tb_swim_ism_arm` §7 (12 checks; reproduces the hang against
+    the unfixed RTL - 6 FAIL - and passes with it), `tb_mfm_format` §5
+    (which had ASSERTED the hang as expected - flipped). Expected guest
+    outcome: the same "Erasing the disk failed" class as 4b, within about
+    half a second; the wording is the hardware gate's to record.
+    ★★ **HARDWARE GATE PASS 2026-09-19, fit `a2df9a78`
+    (`scratch/phase6/MacLC_a2df9a78_phase6_4a.rbf`; STA met setup +0.567 /
+    hold +0.247, 0 critical warnings, loop gate 0/0). BOTH directions,
+    on the same fit, since the engine's tick source changed:**
+    - *800K erased as DOS 720K* (4a): **errors out, no hang** - the
+      machine comes back. `P6_Cross800K.dsk` afterwards: `hfs_check`
+      VOLUME CONSISTENT; `hfs_fork_diff` vs the `.baseline` twin =
+      Marker.bin (696,320 B) IDENTICAL, only the Finder's `Desktop`
+      added; the 6 differing sectors are MDB/bitmap/catalog/alt-MDB,
+      i.e. a mount, not a write.
+    - *720K erased as Macintosh 800K* (4b, re-run): still errors out.
+      `P6_Cross720K.img`: `fat_diff` lists FILLER.BIN (307,200 B) plus
+      the PC Exchange trio (DESKTOP, FINDER.DAT, RESOURCE.FRK/DESKTOP);
+      FILLER.BIN's 600 sectors byte-identical to the baseline; the 9
+      differing sectors are the two FATs, the root directory and the
+      three new files' clusters.
+    Images in `C:/temp/Mac/Test disks/Written/Cross/`. **Gate 4a is
+    CLOSED; Phase 6 has no open hardware gate.**
 - **6D tail gate**: fill a DOS 1.44 MB DC42 to the LAST cluster (mint it with
   a known tail-cluster file), `scripts/fat_diff.py` byte-exact including that
   file, `refused == 0` throughout, then remount and re-verify the tail sector
