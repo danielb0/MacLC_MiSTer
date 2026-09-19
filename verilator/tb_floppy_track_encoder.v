@@ -60,7 +60,9 @@ module tb_floppy_track_encoder;
    floppy_track_encoder dut (
       .clk(clk), .ready(ready), .rst(rst),
       .side(side), .sides(sides), .track(track),
-      .addr(addr), .idata(idata), .odata(odata)
+      .addr(addr), .idata(idata), .odata(odata),
+      // format relay idle (plan Phase 6A): this bench drives the read side only
+      .wr_byte(1'b0), .wr_mark(1'b0), .wr_mark_sector(4'd0), .wr_end(1'b0)
    );
 
    always #5 clk = ~clk;

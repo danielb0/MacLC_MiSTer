@@ -76,6 +76,11 @@ module floppy_loader
 	// checksum as it stood at mount; the writer substitutes its own.
 	input       [5:0] hdr_addr,
 	output reg [15:0] hdr_data,
+	// ── the MEDIUM's own sidedness, latched with `done` (plan Phase 6B) ──
+	// Not the file's size and not the drive's: see rtl/floppy.v's
+	// doubleSidedDisk. Sniffed from the volume header as it streams past, so
+	// it survives a remount, which is the whole reason it exists.
+	output reg        media_ds,
 	output reg  [7:0] dc42_fmt       // DC42 byte 0x50: 0=400K 1=800K 2=720K 3=1440K
 	                                 // ★ For a DC42 image `size` CANNOT decide the
 	                                 // geometry: tags trail the sector data, so an
@@ -143,6 +148,96 @@ module floppy_loader
 	// matching the old download path's `{ioctl_data[7:0], ioctl_data[15:8]}` —
 	// the read side depends on this byte order.
 
+	// ── medium sidedness sniff (plan Phase 6B) ────────────────────────────
+	// Ported from MacPlus_MiSTer rtl/floppy_loader.v at b340c9f, with the DC42
+	// offset this core needs.
+	//
+	// WHY IT EXISTS: 400K and 800K are the same medium; nothing on a diskette
+	// records which it is, and the file's SIZE is not the answer either -- a
+	// One-Sided erase of an 819,200-byte image leaves an 819,200-byte file
+	// holding a 400K volume. Deciding sidedness from the size re-advertises
+	// that disk as double-sided after a remount, and the driver then builds an
+	// 800K volume over a side the erase never wrote (plan section 1.1 defect
+	// 2). Within a session the format byte of the last formatted address field
+	// covers it; this is the answer ACROSS one.
+	//
+	// The Master Directory Block lives in sector 2 on MFS and HFS alike, and
+	// its volume size is drNmAlBlks * drAlBlkSiz. No usable MDB means
+	// double-sided -- an unformatted or foreign medium must not be capped.
+	localparam [15:0] MDB_SIG_MFS = 16'hD2D7;
+	localparam [15:0] MDB_SIG_HFS = 16'h4244;
+	// volume size in 512-byte blocks, midway between 800 and 1600
+	localparam [23:0] SIDEDNESS_THRESHOLD = 24'd1200;
+
+	// Word index within the SECTOR, not the file block: a DC42's 84-byte
+	// header shifts guest sector 2 down by 42 words, and words 0/9/10/11 of it
+	// still land inside file block 2 (indices 42/51/52/53). The subtraction
+	// wraps for indices below 42, and no wrapped value can alias 0/9/10/11.
+	wire [8:0] mdb_idx  = {1'b0, sd_buff_addr[7:0]} - (dc42 ? 9'd42 : 9'd0);
+	wire       mdb_wr   = (state == S_RD) && sd_buff_wr && sd_ack &&
+	                      (sd_lba == 32'd2);
+	wire       sniff_rst = reset || img_mounted;
+
+	reg [15:0] mdb_sig;     // word 0:      drSigWord
+	reg [15:0] mdb_nalbk;   // word 9:      drNmAlBlks
+	reg [15:0] mdb_absz_h;  // words 10-11: drAlBlkSiz, big-endian
+	reg [15:0] mdb_absz_l;
+	reg        mdb_seen;    // sector 2 went by, so the four words are this image's
+
+	always @(posedge clk_sys) begin
+		if (sniff_rst) mdb_seen <= 1'b0;
+		else if (mdb_wr) begin
+			case (mdb_idx)
+			9'd0:  mdb_sig    <= sw_data;
+			9'd9:  mdb_nalbk  <= sw_data;
+			9'd10: mdb_absz_h <= sw_data;
+			9'd11: begin mdb_absz_l <= sw_data; mdb_seen <= 1'b1; end
+			default: ;
+			endcase
+		end
+	end
+
+	// drAlBlkSiz is a non-zero multiple of 512, well under 64K on a floppy
+	wire mdb_ok = mdb_seen &&
+	              ((mdb_sig == MDB_SIG_MFS) || (mdb_sig == MDB_SIG_HFS)) &&
+	              (mdb_absz_h == 16'd0) && (mdb_absz_l != 16'd0) &&
+	              (mdb_absz_l[8:0] == 9'd0) && (mdb_nalbk != 16'd0);
+
+	// drNmAlBlks * (drAlBlkSiz / 512), shift-add over seven cycles
+	reg [23:0] vol_blocks;
+	reg [23:0] mul_cand;
+	reg  [6:0] mul_mult;
+	reg  [2:0] mul_step;
+	reg        mul_busy;
+
+	always @(posedge clk_sys) begin
+		if (sniff_rst) begin
+			mul_busy   <= 1'b0;
+			vol_blocks <= 24'd0;
+		end
+		else if (mdb_wr && mdb_idx == 9'd11) begin
+			vol_blocks <= 24'd0;
+			mul_cand   <= {8'd0, mdb_nalbk};
+			mul_mult   <= sw_data[15:9];
+			mul_step   <= 3'd0;
+			mul_busy   <= 1'b1;
+		end
+		else if (mul_busy) begin
+			if (mul_mult[0]) vol_blocks <= vol_blocks + mul_cand;
+			mul_cand <= {mul_cand[22:0], 1'b0};
+			mul_mult <= {1'b0, mul_mult[6:1]};
+			mul_step <= mul_step + 3'd1;
+			if (mul_step == 3'd6) mul_busy <= 1'b0;
+		end
+	end
+
+	// published with `done`; double-sided until the medium says otherwise
+	always @(posedge clk_sys) begin
+		if (reset) media_ds <= 1'b1;
+		else if (state == S_DONE)
+			media_ds <= !mdb_ok || (vol_blocks > SIDEDNESS_THRESHOLD);
+	end
+
 	always @(posedge clk_sys) begin
 		old_ack <= sd_ack;
 		done    <= 1'b0;
@@ -187,16 +282,27 @@ module floppy_loader
 					                        // container flag standing
 					size         <= 64'd0;
 					if (img_size != 64'd0) begin
-						// COMPLETE blocks only. A DC42 file is 84 + payload
-						// bytes and never ends on a block boundary, so its
-						// final partial block is never streamed: a tagged
-						// image loses nothing (that block is tag section), a
-						// TAGLESS one -- every 1440K DC42 -- never loads the
-						// last 84 bytes of its last sector. HFS leaves the
-						// volume's last block unused, so this is latent; it
-						// is documented with the matching write-side limit
-						// in floppy_sd_writer.v (LC addition 3).
-						sec_total <= img_size[40:9];   // / 512
+						// CEIL, not floor (plan Phase 6D, 2026-09-19). A DC42
+						// file is 84 + payload bytes and never ends on a block
+						// boundary, so a floor here silently dropped the last
+						// 84 bytes of the last sector of every TAGLESS DC42 --
+						// latent for HFS (the volume's last block is unused),
+						// wrong for DOS. Main serves the partial block: its
+						// read path is FileReadAdv into the whole buffer, and
+						// a short count is still truthy, so the block arrives
+						// with the file's true tail at the front and Main's
+						// stale buffer behind it (user_io.cpp:3556).
+						//
+						// The stale remainder is drained to SDRAM past the
+						// payload end -- 428 bytes for a tagless 1.44MB DC42,
+						// 214 words. The floppy region is $600000-$6FFFFF,
+						// 1M words, and the largest payload it holds (a
+						// tagged 1.44MB DC42, 1,509,120 bytes = 736.9K words)
+						// leaves that slack many times over.
+						//
+						// Raw images are always 512-multiples, so ceil == floor
+						// and nothing about them changes.
+						sec_total <= img_size[40:9] + {31'd0, |img_size[8:0]};
 						sd_lba    <= 32'd0;
 						file_word <= 24'd0;
 						loading   <= 1'b1;

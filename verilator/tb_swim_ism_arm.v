@@ -122,7 +122,7 @@ module tb_swim_ism_arm;
       .dataIn(dataIn), .cpuAddrRegHi(addr), .dataOut(dataOut),
       .SEL(1'b0), .driveSel(1'b0),
       .insertDisk(2'b01),        // internal drive only
-      .diskSides(2'b11), .diskMFM(2'b01), .diskHD(2'b01),
+      .diskSides(2'b11), .mediaSides(2'b11), .diskMFM(2'b01), .diskHD(2'b01),
       .writeProtect(2'b10),      // internal drive writable, external locked
       .dskReadAddrInt(dskReadAddrInt), .dskReadAckInt(1'b1),
       .dskReadAddrExt(dskReadAddrExt), .dskReadAckExt(1'b1),

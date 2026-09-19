@@ -961,6 +961,10 @@ module emu
 		// second floppy removed 2026-09-15 — drive 1 is permanently empty
 		.insertDisk({1'b0, dsk_int_ins}),
 		.diskSides({1'b0, dsk_int_ds}),
+		// sim.v has no floppy_loader (images arrive by ioctl_download here),
+		// so there is no volume sniff: "unknown", the term that never lowers
+		// the sidedness ceiling. Tracked in docs/verilator_differences.md.
+		.mediaSides(2'b11),
 		.diskMFM({1'b0, dsk_int_mfm}),
 		// sim has no OSD: the floppy is always write-protected here, matching
 		// the core's power-on default. The write path is exercised by its own

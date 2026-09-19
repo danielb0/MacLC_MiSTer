@@ -110,7 +110,8 @@ module tb_mfm_write_path;
       .ca0(1'b0), .ca1(1'b0), .ca2(1'b0), .SEL(1'b0), .lstrb(1'b0),
       ._enable(1'b0), .writeData(8'd0), .writeReq(1'b0),
       .writeProtect(1'b0),
-      .insertDisk(insertDisk), .diskSides(1'b1),
+      .insertDisk(insertDisk), .diskSides(1'b1), .mediaSides(1'b1),
+      .writeMode(1'b0),   // IWM Q7 (GCR relay bound); this bench is ISM/MFM
       .advanceDriveHead(1'b0),
       .dskReadAddr(dskReadAddr), .dskReadAck(dskReadAck), .dskReadData(dskReadData),
       .ism_active(1'b1), .ism_action(1'b1), .ism_sel(1'b1),

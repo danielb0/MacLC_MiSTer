@@ -117,6 +117,7 @@ module dataController_top(
 	// misc
 	input [1:0] insertDisk,
 	input [1:0] diskSides,
+	input [1:0] mediaSides, // the medium's own sidedness (plan Phase 6B)
 	input [1:0] diskMFM,    // disk is MFM-format (ISM path): {ext,int}
 	input [1:0] writeProtect, // 1 = this drive refuses writes: {ext,int}
 	// committed-sector SDRAM write port (internal drive only)
@@ -1052,6 +1053,7 @@ module dataController_top(
 		.dataOut(swimDataOut),
 		.insertDisk(insertDisk),
 		.diskSides(diskSides),
+		.mediaSides(mediaSides),
 		.diskMFM(diskMFM),
 		.writeProtect(writeProtect),
 		.wrSdAddr(wrSdAddr), .wrSdData(wrSdData),

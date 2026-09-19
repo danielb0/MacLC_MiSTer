@@ -48,11 +48,22 @@
 //      dataSize comes from header words 32/33. The TAG checksum is left as
 //      stored: tags are never written, so it is still right.
 //
+// ★ PHASE 6D (2026-09-19) REVERSED LC ADDITION 3's LAST CLAUSE. The old rule
+// was "file_blocks refuses any block at or past the file's last COMPLETE
+// block, so a tagless DC42's final sector tail stays volatile", on the
+// premise that a partial block would EXTEND the file. It does not: Main
+// clips the write to the file's real end (user_io.cpp:3502-3514, upstream
+// since 2021, so every stock MiSTer does it) and `sd_image_cangrow` is set
+// only by the pre-create mount path, which an OSD mount is not. So the tail
+// block is writable, the writer still sends its full 512-byte buffer, and
+// Main writes only the bytes that exist. `file_tail` carries that one fact
+// in; `head_ok`'s "both blocks or neither" rule is UNCHANGED, which is the
+// point — the straddling sector is now written whole rather than refused.
+//
 // UNCHANGED FROM PHASE 4: write_ok is the single gate on reaching the card
 // (decided in MacLC.sv, never re-derived here); file_blocks refuses any block
-// at or past the file's last COMPLETE block (a DC42 file never ends on a
-// block boundary, hps_io writes whole blocks, so a tagless DC42's final
-// sector tail stays volatile — the loader never loads it either); the guest
+// past the file's end (its last complete block, plus the partial tail block
+// when file_tail says there is one); the guest
 // eject is the flush trigger (an OSD unmount has already taken the file
 // away); img_mounted ABORTS everything, because a sector is now several
 // requests and sd_ack is per SLOT — a running FSM would be walked forward by
@@ -84,6 +95,11 @@ module floppy_sd_writer #(
 	input             dc42,          // DiskCopy 4.2 container (84-byte header)
 	input             flush_req,     // 1-clk pulse: the guest ejected
 	input      [12:0] file_blocks,   // COMPLETE 512-byte blocks in the FILE
+	input             file_tail,     // ...and the file has a PARTIAL block after
+	                                 // them (DC42's 84-byte header makes every
+	                                 // DC42 file end mid-block). That block is
+	                                 // writable — Main clips to EOF; see the
+	                                 // Phase 6D note in the header.
 
 	// where the image lives in SDRAM (word address of payload word 0)
 	input      [23:0] img_base,
@@ -197,8 +213,11 @@ module floppy_sd_writer #(
 	wire [12:0] blk_now  = cur_sec + (phase ? 13'd1 : 13'd0);
 	// Both blocks a DC42 sector touches must be writable, or the sector would
 	// land half-written — the torn state that reads back self-consistently.
-	wire        head_ok  = (file_blocks != 13'd0) &&
-	                       ((dc42 ? (q_head + 13'd1) : q_head) < file_blocks);
+	// The limit is the file's last block INCLUSIVE of a partial tail (6D); 14
+	// bits so q_head + 1 cannot wrap the comparison at the top of the range.
+	wire [13:0] blk_limit = {1'b0, file_blocks} + {13'd0, file_tail};
+	wire [13:0] blk_last  = dc42 ? ({1'b0, q_head} + 14'd1) : {1'b0, q_head};
+	wire        head_ok  = (file_blocks != 13'd0) && (blk_last < blk_limit);
 	// Word w of block blk_now: header word (DC42 block 0, w < 42) or payload
 	// word. DC42 shifts the payload down by the 42 header words.
 	wire        hdr_src  = dc42 && (blk_now == 13'd0) && (w < 9'd42);

@@ -112,6 +112,13 @@ module floppy
 	                             // one byte. MacPlus's hardware-proven shape.
 	input        writeProtect,   // 1 = refuse writes (OSD off / img_readonly /
 	                             // a DC42 mount). Also drives WRTPRT.
+	// IWM Q7: the CPU has put the drive in WRITE MODE. It bounds the write as
+	// a whole for the encoder's format relay (plan Phase 6A.3), and nothing
+	// else consumes it. ★ writeBusyReg alone is NOT a substitute: it drops at
+	// the end of every 128-cep byte, so a busy-derived wrEnd would pulse
+	// between every byte of a track -- the relay would fire after the first
+	// address field, restart the layout mid-format, and disarm.
+	input        writeMode,
 	output       writeBusy,      // 1 = buffer full, the CPU must wait
 	                             // (swim.v inverts it for _iwmBusy)
 	output       writeUnderrun,  // 1 = a byte in flight was abandoned
@@ -142,7 +149,13 @@ module floppy
 	input advanceDriveHead,  // prevents overrun when debugging, does not exist on a real Mac!
 	output reg newByteReady,
 	input insertDisk,
+	// The mounted FILE is 819,200 bytes rather than 409,600 (MacPlus calls this
+	// img800k). A ceiling on sidedness, not the answer to it -- see
+	// doubleSidedDisk below.
 	input diskSides,
+	// The MEDIUM's own sidedness, from floppy_loader.v's mount-time volume
+	// sniff. 1 = double-sided, or unknown. Plan Phase 6B.
+	input mediaSides,
 	output diskEject,
 
 	output motor,
@@ -396,6 +409,14 @@ module floppy
 	reg old_newByteReady;
 	always @(posedge clk) old_newByteReady <= newByteReady;
 
+	// Format-relay nets (plan Phase 6A). Declared at module level because the
+	// encoder below needs them while the write path that drives them lives
+	// inside the WRITE_SUPPORT generate; the no_wrpath branch ties them off.
+	wire       wrRelayByte;
+	wire       wrRelayMark;
+	wire [3:0] wrRelayMarkSector;
+	wire       wrRelayEnd;
+
 	// GCR (IWM-mode) track encoder — 400K/800K
 	floppy_track_encoder enc
 	(
@@ -411,7 +432,13 @@ module floppy
 
 		.addr    ( gcrReadAddr ),
 		.idata   ( dskReadDataLatch ),
-		.odata   ( dskReadDataEnc )
+		.odata   ( dskReadDataEnc ),
+
+		// format relay: the write stream as the decoder consumed it
+		.wr_byte        ( wrRelayByte ),
+		.wr_mark        ( wrRelayMark ),
+		.wr_mark_sector ( wrRelayMarkSector ),
+		.wr_end         ( wrRelayEnd )
 	);
 
 	// MFM (ISM-mode) track encoder — 720K/1.44MB. Free-runs at the byte-cell
@@ -614,8 +641,29 @@ module floppy
 	// reads as a permanent "no index" 1).
 	wire mfm_idx_sense = mfm_spinning ? ~mfm_index : 1'b1;
 	
-	// TODO: auto-detect doubleSidedDisk from image file size
-	wire doubleSidedDisk = diskSides;
+	// Double-sided = drive mechanism AND file size AND the medium. Ported from
+	// MacPlus floppy.v:202 (plan Phase 6B); the drive term is a constant here
+	// because the LC has a SuperDrive and nothing else.
+	//
+	// ★ THREE CEILINGS, and each one is load-bearing:
+	//   - the file must be big enough to hold two sides (diskSides);
+	//   - WITHIN a session the format byte of the last address field the write
+	//     path decoded wins, because a One-Sided erase has just made the disk
+	//     single-sided and no remount has happened yet;
+	//   - ACROSS a remount the medium's own volume header decides
+	//     (mediaSides), because fmtSeen is gone and the file is still the
+	//     original 819,200 bytes.
+	// Without the last term a One-Sided erase of an 800K image comes back
+	// advertised double-sided, and the driver builds an 800K volume over a
+	// side that was never formatted (plan section 1.1, defect 2). 400K and
+	// 800K are the same medium; nothing on a diskette records which it is.
+	// ★ DECLARED HERE, DRIVEN BELOW. The encoder above needs this net, but the
+	// format-byte latch that feeds it needs the decoder's wrSecFmt* and the
+	// write path's writePathReset, which are declared further down -- and a
+	// net referenced before its declaration is implicitly created 1 bit wide
+	// and then collides with the real one (the same trap swim.v documents at
+	// its dataRegWrite block).
+	wire doubleSidedDisk;
 	
 	wire [3:0] driveReadAddr = {ca2,ca1,ca0,SEL};
 	
@@ -923,9 +971,53 @@ module floppy
 		end
 	end
 
+	// ── the write as a whole, for the encoder's format relay (Phase 6A.3) ──
+	// Ported verbatim from MacPlus floppy.v:280-294. wrEnd is delayed TWO
+	// clocks so the encoder has seen the last address mark of the format
+	// before the end arrives; that delay is part of the donor, not slack.
+	reg  wrBusyPrev, wrEndD1;
+	reg  wrEnd;
+	wire wrBusy = (writeMode && _enable == 1'b0) || writeBusyReg;
+	always @(posedge clk or negedge _reset) begin
+		if (_reset == 1'b0) begin
+			wrBusyPrev <= 1'b0;
+			wrEndD1    <= 1'b0;
+			wrEnd      <= 1'b0;
+		end else begin
+			if (cep) wrBusyPrev <= wrBusy;
+			wrEndD1 <= (cep && wrBusyPrev && !wrBusy) || writePathReset;
+			wrEnd   <= wrEndD1;
+		end
+	end
+
 	wire wrSecAmark, wrSecFmtMark, wrSecFmtDs;
 	wire [3:0] wrSecAmarkSector;
 	wire [8:0] wrBufAddr;          // driven by the committer below
+
+	// The relay's view of the write, published to the encoder outside this
+	// generate. decReady is the byte the decoder consumed; the marks are the
+	// GCR decoder's report of the address field that byte completed.
+	assign wrRelayByte       = decReady;
+	assign wrRelayMark       = wrSecAmark;
+	assign wrRelayMarkSector = wrSecAmarkSector;
+	assign wrRelayEnd        = wrEnd;
+
+	// The sidedness ceiling declared above (plan Phase 6B).
+	reg fmtSeen;  // an address field's format byte has been seen since the mount
+	reg fmtDs;
+	always @(posedge clk) begin
+		// cleared on the same eject/mount events as the decoder
+		if (!_reset || writePathReset) begin
+			fmtSeen <= 1'b0;
+			fmtDs   <= 1'b0;
+		end
+		else if (wrSecFmtMark) begin
+			fmtSeen <= 1'b1;
+			fmtDs   <= wrSecFmtDs;
+		end
+	end
+
+	assign doubleSidedDisk = diskSides && (fmtSeen ? fmtDs : mediaSides);
 
 	// ── TWO DECODERS, ONE COMMITTER ───────────────────────────────
 	// A drive's medium is GCR or MFM, never both at once, so the two decoders
@@ -1109,6 +1201,15 @@ module floppy
 		assign wrSdBufAddr   = 8'd0;
 		assign wrSdBufData   = 16'd0;
 		assign wrSdBufWr     = 1'b0;
+		// The sidedness ceiling minus its format-byte term: with no write path
+		// no address field can ever be decoded here, so this is exactly what
+		// the other branch computes with fmtSeen low.
+		assign doubleSidedDisk = diskSides && mediaSides;
+		// ...and no write means nothing for the encoder's format relay.
+		assign wrRelayByte       = 1'b0;
+		assign wrRelayMark       = 1'b0;
+		assign wrRelayMarkSector = 4'd0;
+		assign wrRelayEnd        = 1'b0;
 	end
 	endgenerate
 

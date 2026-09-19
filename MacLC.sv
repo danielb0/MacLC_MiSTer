@@ -2336,6 +2336,9 @@ module emu
 		.wrCommitAddr(wc_commit_addr),
 		.wrSdBufAddr(wc_buf_addr), .wrSdBufData(wc_buf_data), .wrSdBufWr(wc_buf_wr),
 		.diskSides({1'b0, dsk_int_ds}),
+		// The external drive never has media; 1 is "unknown", the term that
+		// never lowers the ceiling.
+		.mediaSides({1'b1, flp_int_media_ds}),
 		.diskMFM({1'b0, dsk_int_mfm}),
 		.diskHD({1'b0, dsk_int_hd}),
 		.diskEject(diskEject),
@@ -2515,6 +2518,12 @@ module emu
 	// dc42_fmt; using `size` for both would leave every DC42 mount with no
 	// geometry, i.e. a disk that mounts and is never readable.
 	wire        flp_int_loading, flp_int_done, flp_int_dc42, flp_int_raw, flp_int_ro;
+	// The medium's own sidedness, sniffed from the volume header at mount and
+	// held by the loader until the next one (plan Phase 6B). Used directly
+	// rather than re-latched here: it must survive a REMOUNT, which is the
+	// entire reason it exists, and the geometry regs below are cleared at
+	// every mount pulse.
+	wire        flp_int_media_ds;
 	wire [63:0] flp_int_size;
 	wire  [7:0] flp_int_fmt;
 	// The read (floppy_loader) and write (floppy_sd_writer) halves of this slot
@@ -2533,14 +2542,19 @@ module emu
 	reg  flp_eject_d;
 	wire flp_eject_pulse = diskEject[0] && !flp_eject_d;
 	always @(posedge clk_sys) flp_eject_d <= diskEject[0];
-	// COMPLETE 512-byte blocks in the FILE. flp_int_size is the PAYLOAD size
-	// (the loader already subtracted DC42's 84-byte header), so the header
-	// goes back on to get the file's own length. The floor is deliberate: a
-	// DC42 file never ends on a block boundary and hps_io can only write whole
-	// blocks, so the final partial block is not writable - see LC addition 3
-	// in rtl/floppy_sd_writer.v.
+	// COMPLETE 512-byte blocks in the FILE, and whether a PARTIAL block
+	// follows them. flp_int_size is the PAYLOAD size (the loader already
+	// subtracted DC42's 84-byte header), so the header goes back on to get the
+	// file's own length. A DC42 file never ends on a block boundary, so
+	// flp_file_tail is 1 for every DC42 mount and 0 for every raw one.
+	// ★ The tail block IS writable (plan Phase 6D): Main clips a write to the
+	// file's real end and never grows an OSD-mounted file, so the writer sends
+	// its full block and only the bytes that exist land. Before 6D this was a
+	// floor with no tail term and the last sector of every tagless DC42 was
+	// unwritable -- and unloadable, the matching floor in floppy_loader.v.
 	wire [63:0] flp_file_bytes  = flp_int_size + (flp_int_dc42 ? 64'd84 : 64'd0);
 	wire [12:0] flp_file_blocks = flp_file_bytes[21:9];
+	wire        flp_file_tail   = |flp_file_bytes[8:0];
 	wire [23:0] flp_int_wr_addr;
 	wire [15:0] flp_int_wr_data;
 	wire        flp_int_wr_req;
@@ -2561,6 +2575,7 @@ module emu
 		.loading(flp_int_loading), .done(flp_int_done), .size(flp_int_size),
 		.readonly(flp_int_ro), .raw_img(flp_int_raw),
 		.is_dc42(flp_int_dc42),
+		.media_ds(flp_int_media_ds),
 		.hdr_addr(flp_hdr_addr), .hdr_data(flp_hdr_data),
 		.dc42_fmt(flp_int_fmt)
 	);
@@ -2621,6 +2636,7 @@ module emu
 		.dc42            ( flp_int_dc42 ),
 		.flush_req       ( flp_eject_pulse ),
 		.file_blocks     ( flp_file_blocks ),
+		.file_tail       ( flp_file_tail ),
 
 		// the floppy image's SDRAM base, as a WORD address — the same
 		// $600000 floppy_loader is given and wc_word_addr adds below

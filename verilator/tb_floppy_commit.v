@@ -61,7 +61,9 @@ module tb_floppy_commit;
    floppy_track_encoder enc (
       .clk(clk), .ready(enc_ready), .rst(!_reset),
       .side(side), .sides(sides), .track(track),
-      .addr(enc_addr), .idata(mem[enc_addr]), .odata(enc_odata)
+      .addr(enc_addr), .idata(mem[enc_addr]), .odata(enc_odata),
+      // format relay idle (plan Phase 6A): this bench drives the read side only
+      .wr_byte(1'b0), .wr_mark(1'b0), .wr_mark_sector(4'd0), .wr_end(1'b0)
    );
 
    // ---- the write engine, transcribed from rtl/floppy.v --------------------

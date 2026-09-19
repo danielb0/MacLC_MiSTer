@@ -72,6 +72,10 @@ module swim
 	input [1:0] insertDisk,
 	output [1:0] diskEject,
 	input [1:0] diskSides,
+	// The MEDIUM's sidedness from the mount-time volume sniff, per drive
+	// (plan Phase 6B). diskSides is the FILE's size; these are not the same
+	// question -- see rtl/floppy.v doubleSidedDisk.
+	input [1:0] mediaSides,
 	input [1:0] diskMFM,    // disk is MFM-format (ISM path): {ext,int}
 	// Committed-sector SDRAM write port, INTERNAL DRIVE ONLY. The external
 	// drive is built with WRITE_SUPPORT=0 (see its instantiation), so it has
@@ -249,6 +253,13 @@ module swim
 	                    (diskEnableExt | diskEnableInt);
 	wire writeReqInt = cen && dataRegWrite && !selectExternalDriveNext;
 	wire writeReqExt = cen && dataRegWrite &&  selectExternalDriveNext;
+
+	// IWM Q7 = write mode, the drive's bound on a write AS A WHOLE for the GCR
+	// format relay (plan Phase 6A.3). The REGISTERED q7, not q7Next: this is a
+	// level that must stay up for the whole track, not a per-access decode.
+	// !ism_mode for the same reason dataRegWrite carries it -- in ISM mode the
+	// phase lines are ISM register traffic and q7 means nothing.
+	wire iwmWriteMode = q7 && !ism_mode;
 	wire newByteReadyInt;
 	wire [7:0] readDataInt;
 	wire senseInt = readDataInt[7]; // bit 7 doubles as the sense line here
@@ -353,6 +364,7 @@ module swim
 		._enable(ism_mode ? ~ism_selonly_int : ~(diskEnableInt & driveSel)),
 		.writeData(dataInLo),          // live bus value, not a register
 		.writeReq(writeReqInt),
+		.writeMode(iwmWriteMode),
 		.writeProtect(writeProtect[0]),
 		.writeBusy(writeBusyInt),
 		.writeUnderrun(writeUnderrunInt),
@@ -373,6 +385,7 @@ module swim
 		.newByteReady(newByteReadyInt),
 		.insertDisk(insertDisk[0]),
 		.diskSides(diskSides[0]),
+		.mediaSides(mediaSides[0]),
 		.diskEject(diskEject[0]),
 
 		.motor(diskMotor[0]),
@@ -435,6 +448,8 @@ module swim
 		._enable(ism_mode ? ~ism_selonly_ext : ~diskEnableExt),
 		.writeData(dataInLo),          // live bus value, not a register
 		.writeReq(writeReqExt),
+		// WRITE_SUPPORT(0): no write path, so nothing consumes this.
+		.writeMode(1'b0),
 		.writeProtect(writeProtect[1]),
 		.writeBusy(writeBusyExt),
 		.writeUnderrun(writeUnderrunExt),
@@ -455,6 +470,7 @@ module swim
 		.newByteReady(newByteReadyExt),
 		.insertDisk(insertDisk[1]),
 		.diskSides(diskSides[1]),
+		.mediaSides(mediaSides[1]),
 		.diskEject(diskEject[1]),
 
 		.motor(diskMotor[1]),

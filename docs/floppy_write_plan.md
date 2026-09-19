@@ -998,7 +998,9 @@ Offline, per commit:
 - ★ A **new bench for the relay**: drive a synthetic format stream into the
   decoder and assert the encoder restarts at the written sector. This is the
   one piece with a hardware failure mode (`fmt1Err`) that no existing bench
-  covers.
+  covers. **BUILT 2026-09-19: `verilator/tb_floppy_format_relay.v`, 15
+  checks** (build command in its header; ~4 minutes, because it has to wait
+  out three real relay gaps of ~9,350 disk bytes at 128 cep each).
 
 On hardware, after a fit:
 - **GCR**: Erase Disk on a blank 800K, then mount/write/verify with
@@ -1044,6 +1046,101 @@ On hardware, after a fit:
 design work, but bounded: the decoder exists, the engine exists, and the
 relay has a worked example one directory away. The largest single unknown is
 the Sony driver's format sequence, which is a MAME question, not an RTL one.
+
+#### ★★ 6A + 6B + 6D: BUILT AND OFFLINE-GATED 2026-09-19 (NOT yet on hardware)
+
+All three landed in one fit, as the order above calls for. What is in the
+tree:
+
+**6A — the GCR format relay.** `rtl/floppy_track_encoder.v` is now
+byte-for-byte MacPlus `b340c9f` plus our own header note; the relay went in
+verbatim, five-bytes-behind-the-D5 arithmetic and all. `rtl/floppy.v` wires
+`.wr_byte(decReady)`, `.wr_mark(wrSecAmark)`, `.wr_mark_sector`, `.wr_end`
+through four module-level nets (the write path lives inside the
+`WRITE_SUPPORT` generate, the encoder does not; the `no_wrpath` branch ties
+them off). `wrEnd` is the donor's `wrBusyPrev`/`wrEndD1` block over
+`wrBusy = (writeMode && !_enable) || writeBusyReg`, and **`writeMode` is a
+new `floppy.v` input** driven from `swim.v`'s registered `q7` qualified
+`!ism_mode` (`iwmWriteMode`), tied 0 on the external drive.
+
+**6B — the sidedness ceiling.** `doubleSidedDisk` is now
+`diskSides && (fmtSeen ? fmtDs : mediaSides)`; the drive term is dropped
+because the LC has only a SuperDrive. `fmtSeen`/`fmtDs` latch the GCR
+decoder's existing `fmt_mark`/`fmt_ds` and clear on `writePathReset`.
+`mediaSides` is new, threaded `floppy_loader → MacLC.sv → dataController_top
+→ swim.v → floppy.v`; the loader's sniff is the donor's MDB block (sector 2,
+`D2D7`/`4244`, `drNmAlBlks × drAlBlkSiz`, seven-cycle shift-add, >1200 blocks
+= double-sided) **plus a DC42 offset the donor has no need of** — the
+84-byte header puts guest sector 2's MDB at words 42/51/52/53 of file block
+2, and reading it at the raw offset would call every DC42 400K image
+double-sided. `sim.v` hardwires `mediaSides` to 1 (no loader there); noted in
+`docs/verilator_differences.md`.
+
+**6D — the DC42 partial tail block.** `floppy_loader.v`'s `sec_total` is
+CEIL (`img_size[40:9] + |img_size[8:0]`), and `floppy_sd_writer.v` takes a
+new `file_tail` input beside `file_blocks` so the limit includes the partial
+block. `head_ok`'s "both blocks or neither" rule is untouched — the
+straddling sector is now written WHOLE rather than refused. Region slack
+checked, not assumed: the floppy region is `$600000-$6FFFFF` = 1M words and
+the largest payload it holds (a tagged 1.44 MB DC42, 736.9K words) leaves the
+214 words of Main's stale buffer far inside it.
+
+**Offline gates, all green on the final tree** (Icarus 12.x; Verilator is not
+installed on this host, so `tb_floppy_loader` and `tb_disk_swap` were run
+under Icarus with their dependencies listed explicitly):
+
+| bench | result |
+|---|---|
+| `tb_floppy_track_encoder` + `gcr_decode_track.py` | PHASE 0 GATE: PASS |
+| `tb_floppy_track_decoder` | PASS 345 / `+single` PASS 189 |
+| `tb_floppy_write` | PASS 55 |
+| `tb_floppy_commit` | PASS 17 |
+| `tb_floppy_sd_writer` | PASS 8523 (was 8005; section 8 REVERSED for 6D) |
+| `tb_floppy_loader` | PASS 34 (was 22; new sections 5 and 6) |
+| `tb_mfm_write_decoder` / `tb_ism_write_engine` | PASS 153 / 22 |
+| `tb_mfm_write_path` / `tb_swim_ism_arm` / `tb_disk_swap` | PASS 11 / 27 / PASS |
+| **`tb_floppy_format_relay`** (new) | **PASS 18** |
+| Quartus Analysis & Synthesis | Successful, 0 errors |
+
+★ **`+single` needs its own image**: `vvp tb_dec.vvp +single` alone fails 29
+of 189, because the default `+imghex` is the 800K image. Generate with
+`python scripts/gcr_gen_image.py --hex --single` and pass
+`+imghex=scratch/gcr_phase0/image400.hex`. That is a bench-invocation trap,
+not a regression — it fails identically on the pre-6A tree.
+
+**Mutation-tested, every new check** (the memory note on false PASSes
+applies; each mutant was built from the real file by substitution and
+confirmed to differ):
+
+| mutant | caught by |
+|---|---|
+| `sec_total` back to FLOOR | `tb_floppy_loader` §5, 6 failures |
+| sniff reads the MDB at the raw offset (no DC42 +42) | `tb_floppy_loader` §6(f) |
+| `media_ds` pinned to 1 | `tb_floppy_loader` §6(b)(e)(f) |
+| `head_ok` back to `< file_blocks` | `tb_floppy_sd_writer` §8 |
+| relay inert (`wr_end` tied 0) | `tb_floppy_format_relay`, 8 failures |
+| `wrBusy = writeBusyReg` (no `writeMode`) | `tb_floppy_format_relay` §4 only |
+
+★★ **THE LAST ROW IS THE FINDING, and it nearly went the other way.** With
+bytes written back to back the drive is never idle at a `cep` boundary, so a
+`writeBusyReg`-derived `wrEnd` never fires mid-track and the mutant passed
+the first three relay cases outright. It is caught only by §4, which stalls
+the guest mid-format for four byte-times — an interrupt in the ROM's write
+loop. So `writeMode` IS load-bearing, but its failure mode is a STALLED
+format, not an ordinary one; a bench that only writes at full rate proves
+nothing about it. Do not simplify §4 away.
+
+★ Two bench traps worth keeping in mind for 6C, both of which cost time here:
+the encoder lays sectors out with a **2:1 interleave** (`STATE_WAIT`:
+0 2 4 6 8 10 1 3 5 7 9 11 on a 12-sector track), so the k-th address field is
+not sector k; and `driveTrack` resets to **0**, so a bench that picks a track
+for its geometry without seeking there runs its own encoder and decoder on a
+different `spt` than the drive.
+
+**What is NOT done:** none of it has been on hardware. The Phase 6 hardware
+gates above are all still open — GCR Erase, the One-Sided erase across a
+remount, the 6D tail gate, the DC42 short soak re-run — and 6C (MFM
+formatting) has not been started.
 
 ---
 

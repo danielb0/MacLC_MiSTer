@@ -70,6 +70,7 @@ module tb_floppy_sd_writer;
    reg         dc42        = 1'b0;
    reg         flush_req   = 1'b0;
    reg  [12:0] file_blocks = 13'd1600;   // an 800K raw image
+   reg         file_tail   = 1'b0;       // ...with no partial block after them
 
    wire  [5:0] hdr_addr;
    reg  [15:0] hdr_data;
@@ -93,6 +94,7 @@ module tb_floppy_sd_writer;
       .commit_done(commit_done), .commit_addr(commit_addr),
       .write_ok(write_ok), .loader_busy(loader_busy),
       .dc42(dc42), .flush_req(flush_req), .file_blocks(file_blocks),
+      .file_tail(file_tail),
       .img_base(IMG_BASE),
       .hdr_addr(hdr_addr), .hdr_data(hdr_data),
       .mem_req(mem_req), .mem_addr(mem_addr), .mem_ack(mem_ack), .mem_dout(mem_dout),
@@ -365,6 +367,7 @@ module tb_floppy_sd_writer;
       $display("7. DC42 sector -> blocks N and N+1 from SDRAM, no card read");
       dc42        <= 1'b1;
       file_blocks <= 13'd1637;             // tagged 800K DC42: 838484 B = 1637 whole
+      file_tail   <= 1'b1;                 // ...plus a 340-byte partial block
       fill_sector(13'd30, 16'h0700);
       fill_sector(13'd31, 16'h0800);
       fill_sector(13'd32, 16'h0900);
@@ -378,12 +381,43 @@ module tb_floppy_sd_writer;
       check(!busy, "the sector is done only once BOTH blocks have landed");
       check(bad_addr == 0, "still no stray SDRAM address");
 
-      // --- 8. the file's final partial block is refused ------------------
-      $display("8. a sector straddling the partial tail block is refused");
+      // --- 8. the file's final PARTIAL block is written (plan Phase 6D) ----
+      // ★ THIS SECTION IS THE REVERSAL. Before 6D the straddling sector was
+      // refused, on the premise that writing a partial block would extend the
+      // file. Main clips the write to the file's real end instead
+      // (user_io.cpp:3502-3514), so the writer sends its full 512-byte buffer
+      // and only the bytes that exist land. The mutant that still refuses it
+      // fails the first check below.
+      $display("8. a sector straddling the partial tail block IS written");
+      fill_sector(13'd1635, 16'h1500);
+      fill_sector(13'd1636, 16'h1600);
+      fill_sector(13'd1637, 16'h1700);     // the words behind the tail block
       pulse_commit(13'd1636);              // needs blocks 1636 AND 1637
       wait_wr(4000, got);
-      check(!got, "must never write half a sector");
+      check(got && sd_lba === 32'd1636, "the sector's first block is written");
+      serve_block(13'd1636, 1'b0, 32'd0);
+      wait_wr(4000, got);
+      check(got && sd_lba === 32'd1637, "and the PARTIAL tail block follows it");
+      serve_block(13'd1637, 1'b0, 32'd0);
+      check(!busy, "both blocks landed: the sector is whole, not torn");
+      check(bad_addr == 0, "the tail block's SDRAM fetch stayed inside the image");
+
+      // ...and one block further on is still past the end.
+      $display("   ...and the block AFTER the tail is still refused");
+      pulse_commit(13'd1637);              // would need 1637 AND 1638
+      wait_wr(4000, got);
+      check(!got, "nothing exists past the partial tail");
       check(!busy, "retired instead");
+
+      // ...and with no tail declared, the old rule stands unchanged: a raw
+      // image is always a whole number of blocks and must not gain one.
+      $display("   ...and a file with NO partial tail refuses it as before");
+      file_tail <= 1'b0;
+      pulse_commit(13'd1636);
+      wait_wr(4000, got);
+      check(!got, "file_tail low: the straddling sector is refused");
+      check(!busy, "retired instead");
+      file_tail <= 1'b1;
 
       // --- 9. eject -> the DC42 data checksum is recomputed and written ---
       $display("9. guest eject: SDRAM scan, then block 0 with the new checksum");
@@ -461,7 +495,8 @@ module tb_floppy_sd_writer;
       // --- 14. eject after a sector that was REFUSED: nothing to rewrite ----
       $display("14. eject when nothing of ours reached the file: header left alone");
       loader_busy <= 1'b1;
-      pulse_commit(13'd1636);              // refused: straddles the partial tail
+      pulse_commit(13'd1637);              // refused: starts at the partial tail,
+                                           // so its second block is past the end
       @(posedge clk); flush_req <= 1'b1;
       @(posedge clk); flush_req <= 1'b0;
       loader_busy <= 1'b0;
@@ -471,7 +506,7 @@ module tb_floppy_sd_writer;
 
       // --- 15. re-written while queued: written twice, NEWEST data both times
       $display("15. a sector re-committed while queued is written twice from live SDRAM");
-      dc42 <= 1'b0; file_blocks <= 13'd1600;
+      dc42 <= 1'b0; file_blocks <= 13'd1600; file_tail <= 1'b0;
       loader_busy <= 1'b1;
       fill_sector(13'd40, 16'h4000);
       pulse_commit(13'd40);
@@ -505,7 +540,7 @@ module tb_floppy_sd_writer;
 
       // --- 17. DC42 sector 0: block 0 carries the loader's header words ------
       $display("17. DC42 sector 0 -> block 0 = header (stale checksum kept) + sector 0 head");
-      dc42 <= 1'b1; file_blocks <= 13'd1637;
+      dc42 <= 1'b1; file_blocks <= 13'd1637; file_tail <= 1'b1;
       fill_sector(13'd0, 16'h0E00);
       fill_sector(13'd1, 16'h0F00);
       pulse_commit(13'd0);

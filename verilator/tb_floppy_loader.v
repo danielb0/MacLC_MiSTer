@@ -50,7 +50,7 @@ module tb_floppy_loader;
 	wire        wr_req;
 	reg         wr_ack = 0;
 
-	wire        loading, done, raw_img, readonly, is_dc42;
+	wire        loading, done, raw_img, readonly, is_dc42, media_ds;
 	wire  [7:0] dc42_fmt;
 	wire [63:0] size;
 	reg   [5:0] hdr_addr = 0;     // Phase 4b header store read port
@@ -67,7 +67,8 @@ module tb_floppy_loader;
 		.wr_addr(wr_addr), .wr_data(wr_data), .wr_req(wr_req), .wr_ack(wr_ack),
 		.loading(loading), .done(done), .size(size),
 		.readonly(readonly), .raw_img(raw_img),
-		.is_dc42(is_dc42), .hdr_addr(hdr_addr), .hdr_data(hdr_data), .dc42_fmt(dc42_fmt)
+		.is_dc42(is_dc42), .media_ds(media_ds),
+		.hdr_addr(hdr_addr), .hdr_data(hdr_data), .dc42_fmt(dc42_fmt)
 	);
 
 	integer errors = 0;
@@ -106,6 +107,49 @@ module tb_floppy_loader;
 
 	reg dc42_mode;
 
+	// ── a planted Master Directory Block in guest sector 2 (plan Phase 6B) ──
+	// The values below are what the SNIFF must SEE, i.e. after the loader's
+	// byte swap; deliver_sector delivers swapped() of them, which is the raw
+	// HPS word. mdb_mode off leaves sector 2 as ordinary patterned data, whose
+	// signature word cannot match either MDB magic.
+	reg        mdb_mode;
+	reg [15:0] mdb_sig_v;      // word 0:  drSigWord
+	reg [15:0] mdb_nalbk_v;    // word 9:  drNmAlBlks
+	reg [15:0] mdb_abhi_v;     // word 10: drAlBlkSiz, high half
+	reg [15:0] mdb_ablo_v;     // word 11: drAlBlkSiz, low half
+
+	// Word index WITHIN THE GUEST SECTOR for a file word index, i.e. the
+	// 84-byte DC42 header taken back off. Mirrors the loader's mdb_idx.
+	function integer sec_word(input integer fw);
+		sec_word = (fw % 256) - (dc42_mode ? 42 : 0);
+	endfunction
+
+	function [15:0] mdb_word_at(input integer fw);
+		begin
+			case (sec_word(fw))
+				0:       mdb_word_at = swapped(mdb_sig_v);
+				9:       mdb_word_at = swapped(mdb_nalbk_v);
+				10:      mdb_word_at = swapped(mdb_abhi_v);
+				11:      mdb_word_at = swapped(mdb_ablo_v);
+				default: mdb_word_at = file_word_at(fw);
+			endcase
+		end
+	endfunction
+
+	// plant an MDB and run a mount with it; nsec must reach sector 2
+	task run_mdb_mount(input [63:0] fsize, input dc42, input integer nsec,
+	                   input [15:0] sig, input [15:0] nalbk, input [15:0] absz);
+		begin
+			mdb_mode    = 1'b1;
+			mdb_sig_v   = sig;
+			mdb_nalbk_v = nalbk;
+			mdb_abhi_v  = 16'd0;
+			mdb_ablo_v  = absz;
+			run_mount(fsize, 1'b0, dc42, nsec);
+			mdb_mode    = 1'b0;
+		end
+	endtask
+
 	// A real DiskCopy 4.2 header word as the HPS delivers it. ★ The detection
 	// is on the RAW word: d[7:0] is the FIRST byte of the pair. Anchored to
 	// the proven download path (MacLC.sv:2538-2541), NOT to what the loader
@@ -139,6 +183,7 @@ module tb_floppy_loader;
 				#1;
 				sd_buff_addr = w[12:0];
 				sd_buff_dout = (dc42_mode && fw < 42) ? dc42_hdr_word(fw)
+				             : (mdb_mode && lba == 32'd2) ? mdb_word_at(fw)
 				                                      : file_word_at(fw);
 				sd_buff_wr   = 1;
 				@(posedge clk);
@@ -182,6 +227,7 @@ module tb_floppy_loader;
 		if (reset) n_served <= 0;
 	end
 
+	integer wait_n;
 	task run_mount(input [63:0] fsize, input ro, input dc42, input integer nsec);
 		integer s;
 		begin
@@ -196,8 +242,22 @@ module tb_floppy_loader;
 			#1 img_mounted = 0;
 
 			for (s = 0; s < nsec; s = s + 1) begin
-				// wait for the loader to ask
-				while (!sd_rd) @(posedge clk);
+				// Wait for the loader to ask -- BOUNDED. An unbounded wait
+				// turns "the loader asked for one sector too few" into the
+				// deadlock guard's timeout, which is a red gate but says
+				// nothing about which sector went missing; the 6D floor/ceil
+				// regression is exactly that shape.
+				wait_n = 0;
+				while (!sd_rd && wait_n < 200000) begin
+					@(posedge clk);
+					wait_n = wait_n + 1;
+				end
+				if (!sd_rd) begin
+					$display("FAIL: loader never requested sector %0d of %0d", s, nsec);
+					errors = errors + 1;
+					checks = checks + 1;
+					disable run_mount;
+				end
 				served[n_served] = sd_lba;
 				n_served = n_served + 1;
 				deliver_sector(sd_lba);
@@ -209,6 +269,7 @@ module tb_floppy_loader;
 	endtask
 
 	initial begin
+		mdb_mode = 1'b0;
 		for (i = 0; i < 65536; i = i + 1) begin
 			sdram[i] = 16'hDEAD;
 			written[i] = 1'b0;
@@ -300,9 +361,74 @@ module tb_floppy_loader;
 		ck(sd_rd === 1'b0, "unmount issued no sd_rd");
 		ck(loading === 1'b0, "unmount left loading low");
 
+		// ══ 5. the DC42 PARTIAL TAIL BLOCK (plan Phase 6D) ═════════════════
+		// ★ THE REGRESSION THIS CATCHES IS SILENT AND WAS LIVE FOR MONTHS.
+		// sec_total used to FLOOR, so a DC42 file -- which is 84 + payload and
+		// can never end on a block boundary -- lost its final partial block,
+		// i.e. the last 84 bytes of its last sector, on every mount. HFS
+		// leaves a volume's last block unused so nothing complained; DOS does
+		// not. Main serves the block short (FileReadAdv returns a truthy 84)
+		// with its own stale buffer behind the real bytes, which is why the
+		// model below delivers a full 256 words for it too.
+		$display("== 5. DC42: the file's final PARTIAL block is loaded, not dropped");
+		run_mount(64'd2048 + 64'd84, 1'b0, 1'b1, 5);
+
+		ck(n_served == 5, "ceil, not floor: 5 sectors asked for (4 whole + the tail)");
+		ck(served[4] == 4, "the fifth request is LBA 4, the partial block");
+		ck(n_writes - wbase == (5 * 256) - 42,
+		   "wrote 1238 words: the whole file minus the 42 header words");
+		ck(size == 64'd2048, "size is still the payload, header removed");
+
+		// the payload the guest can see: 2048 bytes = 1024 words, file words
+		// 42..1065. Words 982..1023 of it are the ones the floor used to drop.
+		first_bad = -1;
+		for (i = 0; i < 1024; i = i + 1)
+			if (first_bad < 0 && (!written[i] || sdram[i] !== swapped(file_word_at(i + 42))))
+				first_bad = i;
+		ck(first_bad < 0, "every payload word reached SDRAM, including the last 42");
+		if (first_bad >= 0)
+			$display("      first bad word %0d: got %04x want %04x written=%0d",
+			         first_bad, sdram[first_bad], swapped(file_word_at(first_bad + 42)),
+			         written[first_bad]);
+		ck(written[1023], "specifically: the LAST payload word is present");
+
+		// ══ 6. the medium's sidedness sniff (plan Phase 6B) ════════════════
+		// Sector 2's MDB, not the file's size: a One-Sided erase leaves a 400K
+		// volume inside an 819,200-byte file, and sizing from the file
+		// re-advertises it double-sided across a remount.
+		$display("== 6. media_ds: the volume header in sector 2 decides");
+
+		// (a) no MDB at all -- unformatted or foreign medium: do NOT cap it
+		run_mount(64'd2048, 1'b0, 1'b0, 4);
+		ck(media_ds === 1'b1, "no MDB signature: double-sided (never lower the ceiling)");
+
+		// (b) a 400K MFS volume: 391 allocation blocks of 1024 B = 782 blocks
+		run_mdb_mount(64'd2048, 1'b0, 4, 16'hD2D7, 16'd391, 16'd1024);
+		ck(media_ds === 1'b0, "MFS 400K volume (782 blocks): SINGLE-sided");
+
+		// (c) an 800K HFS volume: 1594 allocation blocks of 512 B
+		run_mdb_mount(64'd2048, 1'b0, 4, 16'h4244, 16'd1594, 16'd512);
+		ck(media_ds === 1'b1, "HFS 800K volume (1594 blocks): double-sided");
+
+		// (d) a plausible signature with a nonsense drAlBlkSiz is NOT an MDB
+		run_mdb_mount(64'd2048, 1'b0, 4, 16'h4244, 16'd391, 16'd1000);
+		ck(media_ds === 1'b1, "drAlBlkSiz not a multiple of 512: rejected, stays double");
+
+		// (e) ...and it survives a REMOUNT of the same medium, which is the
+		// entire reason the sniff exists rather than a format-byte latch.
+		run_mdb_mount(64'd2048, 1'b0, 4, 16'hD2D7, 16'd391, 16'd1024);
+		ck(media_ds === 1'b0, "remounted 400K volume: still single-sided");
+
+		// (f) inside a DC42 the MDB is 42 words further into file block 2.
+		// Reading it at the raw offset would see patterned filler and answer
+		// "double-sided" for every DC42 400K image.
+		run_mdb_mount(64'd2048 + 64'd84, 1'b1, 5, 16'hD2D7, 16'd391, 16'd1024);
+		ck(media_ds === 1'b0, "DC42 400K volume: the 84-byte header offset is applied");
+
 		$display("");
 		$display("tb_floppy_loader: %0d checks, %0d errors", checks, errors);
-		$display(errors == 0 ? "tb_floppy_loader: PASS" : "tb_floppy_loader: FAIL");
+		if (errors == 0) $display("tb_floppy_loader: PASS");
+		else             $display("tb_floppy_loader: FAIL");
 		$finish;
 	end
 
