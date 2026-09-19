@@ -1003,7 +1003,7 @@ Offline, per commit:
 - ★ A **new bench for the relay**: drive a synthetic format stream into the
   decoder and assert the encoder restarts at the written sector. This is the
   one piece with a hardware failure mode (`fmt1Err`) that no existing bench
-  covers. **BUILT 2026-09-19: `verilator/tb_floppy_format_relay.v`, 15
+  covers. **BUILT 2026-09-19: `verilator/tb_floppy_format_relay.v`, 27
   checks** (build command in its header; ~4 minutes, because it has to wait
   out three real relay gaps of ~9,350 disk bytes at 128 cep each).
 
@@ -1016,6 +1016,19 @@ On hardware, after a fit:
   must come back 400K, and must NOT advertise itself double-sided — **across a
   remount** (that is the `mediaSides` half of 6B). Byte-diff the first
   409,600 bytes only; the upper half is remnant (6B note).
+- **Two-Sided erase of a 400K-sized image** (added in review 2026-09-19,
+  owner's ruling): the expected result is **a valid single-sided 400K MFS
+  volume, exactly as MacPlus produces** — not an error. The Finder offers
+  Two-Sided for any DD medium in a SuperDrive, so this is reachable. The
+  mechanics are the donor's, verbatim: `diskSides` holds the ceiling at 0,
+  so side-0 tracks commit in the single-sided layout, side-1 address fields
+  are REJECTED by the decoder (`floppy_track_decoder.v` `(side && !sides)`)
+  and never reach SDRAM, and the read side re-emits every address field with
+  format byte `$02` (single-sided) — which is what the driver sizes the
+  volume from. The one thing this gate actually tests is the LC ROM's Sony
+  driver reacting to that contract the way the Plus ROM's does. Check with
+  `scripts/hfs_check.py` (MFS, 391 allocation blocks) and confirm the file is
+  still 409,600 bytes.
 - **Cross-encoding erase** (6C.4): an 800K image erased as DOS 720K and a
   720K image erased as Macintosh 800K must both END IN AN ERROR DIALOG, not a
   hang, and the image must be byte-identical afterwards.
@@ -1104,7 +1117,7 @@ under Icarus with their dependencies listed explicitly):
 | `tb_floppy_loader` | PASS 34 (was 22; new sections 5 and 6) |
 | `tb_mfm_write_decoder` / `tb_ism_write_engine` | PASS 153 / 22 |
 | `tb_mfm_write_path` / `tb_swim_ism_arm` / `tb_disk_swap` | PASS 11 / 27 / PASS |
-| **`tb_floppy_format_relay`** (new) | **PASS 18** |
+| **`tb_floppy_format_relay`** (new) | **PASS 18** (27 after the 2026-09-19 review added cases 5-7, the whole-revolution WRAP path; all pass, gaps exact to the byte) |
 | Quartus Analysis & Synthesis | Successful, 0 errors |
 
 ★ **`+single` needs its own image**: `vvp tb_dec.vvp +single` alone fails 29

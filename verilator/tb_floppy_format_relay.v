@@ -31,6 +31,11 @@
  * first address fields are DIFFERENT sectors, cannot both be coincidences —
  * the read side has to follow each one.
  *
+ * ★ CASES 5-7 WRITE A WHOLE REVOLUTION OR MORE (added 2026-09-19). Cases 1-4
+ * never write past two sectors, so the relay counter's wrap at rev_len -- the
+ * path every real format takes -- was untested until then. They are slow
+ * (~3 min each under Icarus); the whole bench is ~10 min. Do not trim them.
+ *
  * EDGE DISCIPLINE: stimulus changes #1 after a clock edge, never at one.
  *
  * Build + run (Icarus 12.x, from the REPO ROOT):
@@ -161,7 +166,9 @@ module tb_floppy_format_relay;
    // matters here for the same reason tb_floppy_track_encoder.v documents:
    // the encoder's addr register needs idle cycles to settle before each
    // ready-gated fetch, and holding ready high fetches some bytes twice.
-   localparam integer FMT_BYTES = 5600;   // >= 7 address fields (782 B apart)
+   // >= a whole revolution (12 * 782 = 9384) plus the 1.3-revolution write of
+   // case 6 (raised from 5600 on 2026-09-19 when the wrap cases were added)
+   localparam integer FMT_BYTES = 12000;
    localparam integer READY_GAP = 8;
    reg  [7:0] fmt_stream [0:FMT_BYTES-1];
    integer    amark_at [0:63];     // index of the D5 of the k-th address field
@@ -489,6 +496,24 @@ module tb_floppy_format_relay;
                        40,          // stall after 40 bytes: past field #1
                        2048);       // four byte-times of silence (128 cep each)
 
+      // ── 5-7. WHOLE-REVOLUTION writes: the relay_ahead WRAP path ─────────
+      // ★ Added in review 2026-09-19. Cases 1-4 write at most two sectors,
+      // but a real format writes at least one full revolution, and that is
+      // the only thing that exercises the encoder's
+      // `relay_ahead == 0 ? rev_len - 1 : relay_ahead - 1` wrap. The gap the
+      // relay leaves is rev_len - 5 - (bytes written after the mark), modulo
+      // rev_len; the read-side decoder reports the field 5 bytes after its D5,
+      // so the observed gap is that plus 5. Measured on the pre-fold tree:
+      // 9332 / 6992 / 8610 read bytes for the three cases, i.e. exact.
+      $display("5. a WHOLE-REVOLUTION format from field #0 (sector 0): the wrap path");
+      relay_case(0, REV_LEN + 60, sector_of_field(0));
+
+      $display("6. a 1.3-revolution format from field #3 (sector 6): wrap, then relay to the FIRST mark");
+      relay_case(3, REV_LEN + 2400, sector_of_field(3));
+
+      $display("7. a format of exactly one sector pitch from field #4 (sector 8)");
+      relay_case(4, 782, sector_of_field(4));
+
       $display("");
       $display("tb_floppy_format_relay: %0d checks, %0d errors", checks, errors);
       if (errors == 0) $display("tb_floppy_format_relay: PASS");
@@ -496,9 +521,11 @@ module tb_floppy_format_relay;
       $finish;
    end
 
-   // deadlock guard
+   // deadlock guard. Seven cases at 128 cep per written byte: the whole run
+   // is ~1.35 s of simulated time (~12 min wall under Icarus), most of it
+   // cases 5-6 writing a revolution and more.
    initial begin
-      #900_000_000;
+      #3_000_000_000;
       $display("FAIL: timeout — the bench never completed");
       $finish;
    end
