@@ -1016,6 +1016,13 @@ On hardware, after a fit:
   must come back 400K, and must NOT advertise itself double-sided — **across a
   remount** (that is the `mediaSides` half of 6B). Byte-diff the first
   409,600 bytes only; the upper half is remnant (6B note).
+  ★★ **NEEDS A PRE-7.5 SYSTEM — 7.5.5 CANNOT REACH THIS GATE** (bench,
+  2026-09-19). Under 7.5.5 the Erase dialog offers **no One-Sided option at
+  all**: a one-sided format produces an MFS volume, and System 7.5 through
+  7.6.1 mount MFS READ-ONLY (a write fails `-4 unimpErr`, confirmed on this
+  core 2026-09-16). Run it under System 6.0.8 or 7.1. The same blocker
+  applies to the Two-Sided-400K gate below, so run the two together — and do
+  NOT read either one's failure under 7.5.5 as an RTL defect.
 - **Two-Sided erase of a 400K-sized image** (added in review 2026-09-19,
   owner's ruling): the expected result is **a valid single-sided 400K MFS
   volume, exactly as MacPlus produces** — not an error. The Finder offers
@@ -1029,9 +1036,53 @@ On hardware, after a fit:
   driver reacting to that contract the way the Plus ROM's does. Check with
   `scripts/hfs_check.py` (MFS, 391 allocation blocks) and confirm the file is
   still 409,600 bytes.
+  ★★ **ALSO NEEDS A PRE-7.5 SYSTEM** (bench, 2026-09-19): the expected result
+  IS an MFS volume, and 7.5.5 cannot create one — see the One-Sided gate
+  above. Deferred together on 2026-09-19.
 - **Cross-encoding erase** (6C.4): an 800K image erased as DOS 720K and a
   720K image erased as Macintosh 800K must both END IN AN ERROR DIALOG, not a
-  hang, and the image must be byte-identical afterwards.
+  hang, and the failed format must not damage the image.
+  ★ **NOT "byte-identical afterwards" — that criterion was unachievable and
+  is corrected here (hardware, 2026-09-19).** Mounting an HFS volume makes
+  the Finder write a `Desktop` file, and mounting a FAT volume through PC
+  Exchange writes `DESKTOP` + `FINDER.DAT` + `RESOURCE.FRK/DESKTOP`. No
+  mounted image can ever be byte-identical, so an md5 check fails this gate
+  forever whatever the core did. Judge it the way `hfs_fork_diff.py` already
+  does: **payload byte-identical, Finder-generated files excused.** Measured
+  on the 2026-09-19 run: 6 of 1600 sectors changed on the 800K (MDB
+  `drNmFls` 1->2, `drNxtCNID` 17->18, `drFreeBks` 231->228, `drAllocPtr`
+  ->1365, plus the alt-MDB mirror at 1598) and 9 of 1440 on the 720K (FATs,
+  root dir, and the new files' data at 614-619) — with `FILLER.BIN`'s whole
+  307,200-byte span at sectors 14-613 bit-identical.
+
+  ★★ **RESULT 2026-09-19, fit `c447fbe9`: the two directions do NOT behave
+  alike. 720K-as-800K PASSES; 800K-as-720K HANGS.**
+  - *720K erased as Macintosh 800K* — PASS. "Erasing the disk failed"
+    dialog, PISM `write:idle arm=0 anchor=sector 3`, CPU back in RAM, image
+    undamaged.
+  - *800K erased as DOS 720K* — **FAIL: the machine hangs**, exactly as
+    6C.4 feared. Probed: PISM `write:ACTIVE arm=1 anchor=INVALID` (armed
+    with no anchor) while the CPU spins in a two-instruction ROM loop at
+    `$A6F132`/`$A6F134` re-reading the IWM at `$F17E00`, value never
+    changing — the ROM's UNBOUNDED write-handshake poll. Chain: the file is
+    819,200 B so size pins the encoding to GCR and `mfm_disk` is 0 ->
+    `mfm_spinning` 0 (`floppy.v:483`) -> the write tick never fires -> the
+    engine neither pops nor underruns -> no handshake -> poll forever.
+    PFSW stayed `pstate=IDLE` with refusals 0, and `wrIsMfm = mfm_disk = 0`
+    keeps the MFM decoder away from the committer, so the image is safe.
+  - ★ **On the fix, 6C.4's "refuse at the driver's density sense" is the
+    wrong place.** `floppy.v:307` reports `is_2m = ~mfm_hd` (generic DD
+    media), which is HONEST — a real SuperDrive with real DD media does
+    offer DOS 720K, because magnetic media is encoding-agnostic; our
+    constraint is peculiar to us (hps_io cannot resize a file, so size pins
+    the encoding). That field is also the one the 2026-08-03 hardware work
+    fixed after an inversion and its comment says "Do NOT 'fix' this back",
+    and narrowing it would endanger the legitimate 720K path this same gate
+    list still has to pass. **Refuse at the WRITE-ARM point instead**: when
+    the ISM write engine is armed while `mfm_disk` is 0, raise the
+    underrun/error the driver already handles. That still refuses on
+    density, changes neither which decoder commits nor the drive ID, and
+    turns the hang into the error the gate asks for.
 - **6D tail gate**: fill a DOS 1.44 MB DC42 to the LAST cluster (mint it with
   a known tail-cluster file), `scripts/fat_diff.py` byte-exact including that
   file, `refused == 0` throughout, then remount and re-verify the tail sector
