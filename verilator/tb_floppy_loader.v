@@ -20,11 +20,21 @@
  *
  * The reference image is byte-patterned so a misplaced word names itself.
  *
- * Build + run (Verilator 5.x, from verilator/):
- *   verilator --binary -j 0 -Wno-fatal -Wno-WIDTHTRUNC --timescale 1ns/1ps -I../rtl \
- *     --Mdir /tmp/obj_flpload --top-module tb_floppy_loader \
- *     tb_floppy_loader.v ../rtl/floppy_loader.v
- *   /tmp/obj_flpload/Vtb_floppy_loader
+ * Build + run (Icarus, from the repo root):
+ *   /c/iverilog/bin/iverilog -g2012 -s tb_floppy_loader \
+ *     -o scratch/phase1/tb_load.vvp verilator/tb_floppy_loader.v \
+ *     rtl/floppy_loader.v
+ *   /c/iverilog/bin/vvp scratch/phase1/tb_load.vvp
+ *
+ * ★ 2026-09-19: this header named Verilator 5.x, which CANNOT build the bench
+ * and has not been able to since run_mdb_mount was added. run_mdb_mount calls
+ * run_mount (~line 148) before run_mount is declared (~line 231); Verilator
+ * binds the forward reference as a zero-argument task and then rejects every
+ * argument of every call, 4 args x 6 call sites = "Too many arguments in call
+ * to task 'run_mount'" x 24. Icarus accepts the forward reference and the
+ * bench passes as written: 34 checks, 0 errors. Do NOT run the old Verilator
+ * line and conclude the bench is broken. Moving the run_mount declaration
+ * above run_mdb_mount would make both tools build it, if that is ever wanted.
  */
 `timescale 1ns/1ps
 
